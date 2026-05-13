@@ -31,13 +31,12 @@ def capture_output(func, *args, **kwargs):
     return result, buffer.getvalue()
 
 
-@st.cache_resource(show_spinner=False)
-def load_market_data(refresh_token=0, _progress_callback=None):
+def load_market_data(refresh_token=0, progress_callback=None):
     force_refresh = refresh_token > 0
     (df_all, stock_dict), logs = capture_output(
         stock_1.prepare_data,
         force_refresh=force_refresh,
-        progress_callback=_progress_callback,
+        progress_callback=progress_callback,
     )
 
     if df_all is not None and not df_all.empty and "Date" in df_all.columns:
@@ -49,7 +48,10 @@ def load_market_data(refresh_token=0, _progress_callback=None):
 
 def init_state():
     st.session_state.setdefault("refresh_token", 0)
+    st.session_state.setdefault("loaded_refresh_token", None)
     st.session_state.setdefault("data_loaded", False)
+    st.session_state.setdefault("market_data", None)
+    st.session_state.setdefault("stock_dict", {})
     st.session_state.setdefault("last_logs", "")
     st.session_state.setdefault("scan_result", pd.DataFrame())
     st.session_state.setdefault("history_result", pd.DataFrame())
@@ -59,6 +61,17 @@ def init_state():
 
 def get_data():
     st.session_state.data_loaded = True
+
+    if (
+        st.session_state.market_data is not None
+        and st.session_state.loaded_refresh_token == st.session_state.refresh_token
+    ):
+        return (
+            st.session_state.market_data,
+            st.session_state.stock_dict,
+            st.session_state.last_logs,
+        )
+
     progress_bar = st.progress(0)
     status_box = st.empty()
 
@@ -88,10 +101,13 @@ def get_data():
     with st.spinner("載入資料中，第一次可能需要幾分鐘..."):
         df_all, stock_dict, logs = load_market_data(
             st.session_state.refresh_token,
-            _progress_callback=update_progress,
+            progress_callback=update_progress,
         )
     progress_bar.progress(1.0)
     status_box.success("資料載入完成。")
+    st.session_state.market_data = df_all
+    st.session_state.stock_dict = stock_dict
+    st.session_state.loaded_refresh_token = st.session_state.refresh_token
     st.session_state.last_logs = logs
     return df_all, stock_dict, logs
 
@@ -233,7 +249,9 @@ def sidebar():
     if st.sidebar.button("強制重新下載", use_container_width=True):
         st.session_state.refresh_token += 1
         st.session_state.data_loaded = True
-        load_market_data.clear()
+        st.session_state.market_data = None
+        st.session_state.stock_dict = {}
+        st.session_state.loaded_refresh_token = None
 
     st.sidebar.divider()
     st.sidebar.caption("Streamlit Community Cloud 部署時，主檔填 streamlit_app.py。")
