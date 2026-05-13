@@ -131,6 +131,15 @@ def get_tw_stock_list():
 # 特徵計算
 # ==========================================
 # Render/cloud-friendly replacement for the stock list loader above.
+def add_required_benchmark(stock_dict):
+    stock_dict = stock_dict or {}
+    stock_dict.setdefault(
+        BENCHMARK_TICKER,
+        {"name": BENCHMARK_NAME, "ind": "Benchmark"},
+    )
+    return stock_dict
+
+
 def get_tw_stock_list():
     print("Fetching Taiwan stock list from MOPS open data...")
     stock_dict = {}
@@ -175,7 +184,7 @@ def get_tw_stock_list():
             print(f"Failed to load {label} stocks from MOPS CSV: {e}")
 
     if stock_dict:
-        return stock_dict
+        return add_required_benchmark(stock_dict)
 
     print("MOPS CSV returned no stocks; trying TWSE OpenAPI fallback...")
     fallback_sources = [
@@ -206,7 +215,7 @@ def get_tw_stock_list():
             print(f"Failed to load {label} stocks from TWSE OpenAPI: {e}")
 
     if stock_dict:
-        return stock_dict
+        return add_required_benchmark(stock_dict)
 
     print("TWSE OpenAPI returned no stocks; trying FinMind TaiwanStockInfo...")
     try:
@@ -284,7 +293,7 @@ def get_tw_stock_list():
             for ticker, (name, industry) in fallback_stocks.items()
         }
 
-    return stock_dict
+    return add_required_benchmark(stock_dict)
 
 
 def calc_features(df, ticker, name):
@@ -670,6 +679,9 @@ def build_hint(row):
 def score_one_day(day_df):
     day_df = day_df.copy()
 
+    if "Ticker" in day_df.columns:
+        day_df = day_df[day_df["Ticker"] != BENCHMARK_TICKER].copy()
+
     day_df = day_df.dropna(subset=FEATURES + [
         'Close',
         'MA5',
@@ -791,6 +803,33 @@ def analyze_single_stock(df_all, code):
     scored_market = score_one_day(latest_market_df)
 
     stock_score_row = scored_market[scored_market['Ticker'] == latest['Ticker']]
+
+    score_status = "列入候選池"
+    score_reason = "通過收盤站上 MA5、成交金額與成交量門檻，已納入 AI 分數排名。"
+
+    missing_features = [
+        col for col in FEATURES + ['Close', 'MA5', 'Avg_Value_20', 'Value', 'Avg_Volume_20']
+        if col not in latest.index or pd.isna(latest[col])
+    ]
+
+    if latest['Ticker'] == BENCHMARK_TICKER:
+        score_status = "不列入排名"
+        score_reason = f"{BENCHMARK_NAME} 是績效比較基準，不列入選股排名。"
+    elif missing_features:
+        score_status = "資料不足"
+        score_reason = "缺少排名所需欄位：" + "、".join(missing_features)
+    elif latest['Close'] < latest['MA5']:
+        score_status = "未通過候選池"
+        score_reason = "收盤價低於 MA5，短線動能未通過策略防守線。"
+    elif latest['Avg_Value_20'] < MIN_AVG_VALUE_20:
+        score_status = "未通過候選池"
+        score_reason = f"20日均成交金額不足，目前約 {latest['Avg_Value_20'] / 10000:.0f} 萬，門檻為 {MIN_AVG_VALUE_20 / 10000:.0f} 萬。"
+    elif latest['Value'] < MIN_TODAY_VALUE:
+        score_status = "未通過候選池"
+        score_reason = f"訊號日成交金額不足，目前約 {latest['Value'] / 10000:.0f} 萬，門檻為 {MIN_TODAY_VALUE / 10000:.0f} 萬。"
+    elif latest['Avg_Volume_20'] < MIN_AVG_VOLUME_20:
+        score_status = "未通過候選池"
+        score_reason = f"20日均量不足，目前約 {latest['Avg_Volume_20']:.0f}，門檻為 {MIN_AVG_VOLUME_20:.0f}。"
 
     if not stock_score_row.empty:
         ai_score = stock_score_row.iloc[0]['AI_Score']
@@ -954,6 +993,8 @@ def analyze_single_stock(df_all, code):
         'Trend_Points': trend_points,
         'Trend_View': trend_view,
         'Action_View': action_view,
+        'Score_Status': score_status,
+        'Score_Reason': score_reason,
         'AI_Score': ai_score,
         'Market_Rank': market_rank,
         'Market_Total': market_total,

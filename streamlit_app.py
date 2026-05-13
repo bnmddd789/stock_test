@@ -23,6 +23,70 @@ st.set_page_config(
 
 FORWARD_DAYS = [1, 3, 5, 7, 10, 14, 21, 30]
 
+COLUMN_LABELS = {
+    "Rank": "排名",
+    "ID": "代號",
+    "Name": "名稱",
+    "Close": "收盤",
+    "AI_Score": "AI 分數",
+    "Avg_Value_20": "20日均額",
+    "Volume_Ratio": "量比",
+    "ROC_1": "1日漲跌%",
+    "ROC_3": "3日漲跌%",
+    "ROC_5": "5日漲跌%",
+    "ROC_10": "10日漲跌%",
+    "ROC_20": "20日漲跌%",
+    "ROC_30": "30日漲跌%",
+    "F_ROC_10": "10日動能%",
+    "Hint": "提醒",
+    "Signal_Date": "訊號日",
+    "Entry_Date": "進場日",
+    "Entry_Open": "進場開盤",
+    "Day1_Net_Return_%": "1日報酬%",
+    "Day7_Net_Return_%": "7日報酬%",
+    "Day30_Net_Return_%": "30日報酬%",
+    "Date": "日期",
+    "MA5": "MA5",
+    "MA20": "MA20",
+    "MA60": "MA60",
+    "Trend_Points": "趨勢分",
+    "Trend_View": "趨勢判斷",
+    "Score_Status": "分數狀態",
+    "Score_Reason": "未排名原因",
+    "Market_PR_%": "市場 PR%",
+    "Hist_Vol": "歷史波動",
+    "BB_Width": "布林寬度",
+    "P_to_MA20": "距 MA20%",
+    "P_to_MA60": "距 MA60%",
+    "Recent_20_High": "20日高點",
+    "Recent_20_Low": "20日低點",
+    "Reasons": "判斷原因",
+}
+
+DISPLAY_DIGITS = {
+    "AI_Score": 2,
+    "Close": 2,
+    "Entry_Open": 2,
+    "Avg_Value_20": 0,
+    "Volume_Ratio": 2,
+    "ROC_1": 2,
+    "ROC_3": 2,
+    "ROC_5": 2,
+    "ROC_10": 2,
+    "ROC_20": 2,
+    "ROC_30": 2,
+    "F_ROC_10": 2,
+    "Day1_Net_Return_%": 2,
+    "Day7_Net_Return_%": 2,
+    "Day30_Net_Return_%": 2,
+    "MA5": 2,
+    "MA20": 2,
+    "MA60": 2,
+    "Trend_Points": 0,
+    "Market_PR_%": 2,
+    "Recent_20_High": 2,
+    "Recent_20_Low": 2,
+}
 
 def capture_output(func, *args, **kwargs):
     buffer = io.StringIO()
@@ -57,6 +121,7 @@ def init_state():
     st.session_state.setdefault("history_result", pd.DataFrame())
     st.session_state.setdefault("history_comparison", pd.DataFrame())
     st.session_state.setdefault("single_result", pd.DataFrame())
+    st.session_state.setdefault("fundamental_cache", {})
 
 
 def get_data():
@@ -120,13 +185,24 @@ def existing_cols(df, cols):
     return [col for col in cols if col in df.columns]
 
 
-def render_table(df, cols=None):
+def prepare_display_df(df, cols=None):
+    view = df[existing_cols(df, cols)].copy() if cols else df.copy()
+
+    for col, digits in DISPLAY_DIGITS.items():
+        if col in view.columns:
+            view[col] = pd.to_numeric(view[col], errors="coerce").round(digits)
+
+    view = view.rename(columns=COLUMN_LABELS)
+    return view
+
+
+def render_table(df, cols=None, height=None):
     if df is None or df.empty:
         st.info("目前沒有資料。")
         return
 
-    view = df[existing_cols(df, cols)] if cols else df
-    st.dataframe(view, use_container_width=True, hide_index=True)
+    view = prepare_display_df(df, cols)
+    st.dataframe(view, use_container_width=True, hide_index=True, height=height)
 
 
 def fmt_number(value, digits=2):
@@ -136,6 +212,169 @@ def fmt_number(value, digits=2):
         return f"{float(value):.{digits}f}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def fmt_money(value):
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value), 0)
+
+
+def fmt_pct(value):
+    if value is None or pd.isna(value):
+        return None
+    return round(float(value), 2)
+
+
+def compact_text(text, max_len=360):
+    if not text:
+        return ""
+
+    text = " ".join(str(text).split())
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "..."
+
+
+def normalize_ticker_from_id(stock_id, df_all=None):
+    value = str(stock_id or "").strip().upper()
+    if not value:
+        return ""
+
+    if value.endswith(".TW") or value.endswith(".TWO"):
+        return value
+
+    if df_all is not None and not df_all.empty and "ID" in df_all.columns:
+        matched = df_all[df_all["ID"].astype(str).str.upper() == value]
+        if not matched.empty:
+            return str(matched["Ticker"].iloc[0])
+
+    return f"{value}.TW"
+
+
+def get_local_stock_info(ticker, stock_dict):
+    if not ticker:
+        return {}
+    return (stock_dict or {}).get(ticker, {}) or {}
+
+
+def fetch_fundamentals(ticker, stock_dict):
+    cache = st.session_state.fundamental_cache
+    if ticker in cache:
+        return cache[ticker]
+
+    local_info = get_local_stock_info(ticker, stock_dict)
+    result = {
+        "ticker": ticker,
+        "name": local_info.get("name", ""),
+        "industry": local_info.get("ind", "產業分類暫無資料"),
+        "sector": "",
+        "business": "",
+        "website": "",
+        "metrics": {},
+        "source": "本地股票清單",
+        "error": "",
+    }
+
+    try:
+        info = stock_1.yf.Ticker(ticker).info or {}
+
+        dividend_yield = info.get("dividendYield")
+        if dividend_yield is not None and dividend_yield <= 1:
+            dividend_yield = dividend_yield * 100
+
+        metrics = {
+            "市值": info.get("marketCap"),
+            "本益比": info.get("trailingPE"),
+            "預估本益比": info.get("forwardPE"),
+            "股價淨值比": info.get("priceToBook"),
+            "EPS": info.get("trailingEps"),
+            "殖利率%": dividend_yield,
+        }
+
+        result.update({
+            "industry": info.get("industry") or result["industry"],
+            "sector": info.get("sector") or "",
+            "business": compact_text(info.get("longBusinessSummary")),
+            "website": info.get("website") or "",
+            "metrics": metrics,
+            "source": "yfinance",
+        })
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    if not result["business"]:
+        result["business"] = f"目前可取得的分類為：{result['industry']}。"
+
+    cache[ticker] = result
+    return result
+
+
+def render_fundamentals_panel(rows_df, df_all=None, stock_dict=None, key_prefix="fund"):
+    if rows_df is None or rows_df.empty:
+        return
+
+    st.markdown("**個股產業與基本面**")
+
+    options = []
+    for _, row in rows_df.iterrows():
+        stock_id = row.get("ID", row.get("Ticker", ""))
+        name = row.get("Name", "")
+        ticker = normalize_ticker_from_id(stock_id, df_all)
+        if not ticker:
+            continue
+        options.append((f"{stock_id} {name}".strip(), ticker))
+
+    if not options:
+        st.info("目前沒有可查看基本面的股票。")
+        return
+
+    labels = [label for label, _ in options]
+    selected_label = st.selectbox("選擇股票", labels, key=f"{key_prefix}_select")
+    selected_ticker = dict(options)[selected_label]
+    local_info = get_local_stock_info(selected_ticker, stock_dict)
+
+    st.caption(
+        f"{selected_ticker}｜產業：{local_info.get('ind', '產業分類暫無資料')}"
+    )
+
+    if st.button("載入基本面", key=f"{key_prefix}_load", use_container_width=True):
+        with st.spinner("抓取基本面資料中..."):
+            fundamentals = fetch_fundamentals(selected_ticker, stock_dict)
+        st.session_state[f"{key_prefix}_fundamentals"] = fundamentals
+
+    fundamentals = st.session_state.get(f"{key_prefix}_fundamentals")
+    if not fundamentals or fundamentals.get("ticker") != selected_ticker:
+        st.info("按「載入基本面」後會顯示公司產業、業務摘要與常用估值指標。")
+        return
+
+    if fundamentals.get("error"):
+        st.warning(f"線上基本面抓取失敗，先顯示本地產業資料：{fundamentals['error']}")
+
+    metric_cols = st.columns(6)
+    metrics = fundamentals.get("metrics", {})
+    metric_items = [
+        ("市值", metrics.get("市值")),
+        ("本益比", metrics.get("本益比")),
+        ("預估本益比", metrics.get("預估本益比")),
+        ("股價淨值比", metrics.get("股價淨值比")),
+        ("EPS", metrics.get("EPS")),
+        ("殖利率%", metrics.get("殖利率%")),
+    ]
+
+    for col, (label, value) in zip(metric_cols, metric_items):
+        if label == "市值" and value is not None and not pd.isna(value):
+            display = f"{float(value) / 100000000:.0f} 億"
+        else:
+            display = fmt_number(value)
+        col.metric(label, display)
+
+    st.write(f"**產業**：{fundamentals.get('industry') or '-'}")
+    if fundamentals.get("sector"):
+        st.write(f"**Sector**：{fundamentals['sector']}")
+    st.write(f"**公司做什麼**：{fundamentals.get('business') or '-'}")
+    if fundamentals.get("website"):
+        st.link_button("公司網站", fundamentals["website"])
 
 
 def render_status(df_all):
@@ -223,13 +462,13 @@ def build_history_comparison(df_all, result_df, target_date):
         rows.append({
             "持有日": days,
             "有效檔數": valid_count,
-            "投入金額": total_invest,
-            "Top20 淨值": strategy_value,
-            "Top20 報酬%": strategy_return,
-            f"{stock_1.BENCHMARK_NAME} 淨值": benchmark_value,
-            f"{stock_1.BENCHMARK_NAME} 報酬%": benchmark_return,
-            "差距%": diff_return,
-            "差距金額": diff_value,
+            "投入金額": fmt_money(total_invest),
+            "Top20 淨值": fmt_money(strategy_value),
+            "Top20 報酬%": fmt_pct(strategy_return),
+            f"{stock_1.BENCHMARK_NAME} 淨值": fmt_money(benchmark_value),
+            f"{stock_1.BENCHMARK_NAME} 報酬%": fmt_pct(benchmark_return),
+            "差距%": fmt_pct(diff_return),
+            "差距金額": fmt_money(diff_value),
             "勝出": winner,
         })
 
@@ -252,6 +491,7 @@ def sidebar():
         st.session_state.market_data = None
         st.session_state.stock_dict = {}
         st.session_state.loaded_refresh_token = None
+        st.session_state.fundamental_cache = {}
 
     st.sidebar.divider()
     st.sidebar.caption("Streamlit Community Cloud 部署時，主檔填 streamlit_app.py。")
@@ -275,7 +515,13 @@ def latest_tab():
         "Rank", "ID", "Name", "Close", "AI_Score", "Avg_Value_20",
         "Volume_Ratio", "ROC_3", "ROC_5", "F_ROC_10", "Hint",
     ]
-    render_table(st.session_state.scan_result, cols)
+    render_table(st.session_state.scan_result, cols, height=520)
+    render_fundamentals_panel(
+        st.session_state.scan_result,
+        st.session_state.market_data,
+        st.session_state.stock_dict,
+        key_prefix="latest",
+    )
 
 
 def history_tab():
@@ -307,7 +553,16 @@ def history_tab():
 
     if not st.session_state.history_comparison.empty:
         st.markdown("**績效比較**")
-        render_table(st.session_state.history_comparison)
+        bench_value_col = f"{stock_1.BENCHMARK_NAME} 淨值"
+        if (
+            bench_value_col in st.session_state.history_comparison.columns
+            and st.session_state.history_comparison[bench_value_col].isna().all()
+        ):
+            st.warning(
+                f"目前快取沒有 {stock_1.BENCHMARK_NAME} ({stock_1.BENCHMARK_TICKER}) "
+                "資料。請按左側「強制重新下載」更新快取後再驗證。"
+            )
+        render_table(st.session_state.history_comparison, height=320)
 
     st.markdown("**推薦名單**")
     cols = [
@@ -315,7 +570,13 @@ def history_tab():
         "Day1_Net_Return_%", "Day7_Net_Return_%", "Day30_Net_Return_%",
         "Avg_Value_20", "Volume_Ratio", "Hint",
     ]
-    render_table(st.session_state.history_result, cols)
+    render_table(st.session_state.history_result, cols, height=430)
+    render_fundamentals_panel(
+        st.session_state.history_result,
+        st.session_state.market_data,
+        st.session_state.stock_dict,
+        key_prefix="history",
+    )
 
 
 def single_tab():
@@ -354,18 +615,33 @@ def single_tab():
     if isinstance(action_view, str) and action_view.strip():
         st.info(action_view)
 
+    score_status = row.get("Score_Status", "")
+    score_reason = row.get("Score_Reason", "")
+    if isinstance(score_status, str) and score_status.strip():
+        if score_status == "列入候選池":
+            st.success(score_reason)
+        else:
+            st.warning(f"{score_status}：{score_reason}")
+
     hint = row.get("Hint", "")
     if isinstance(hint, str) and hint.strip():
         st.warning(hint)
 
     cols = [
         "Date", "ID", "Name", "Close", "MA5", "MA20", "MA60",
-        "Trend_Points", "Trend_View", "AI_Score", "Market_PR_%",
+        "Trend_Points", "Trend_View", "Score_Status", "Score_Reason",
+        "AI_Score", "Market_PR_%",
         "ROC_1", "ROC_3", "ROC_5", "ROC_10", "ROC_20", "ROC_30",
         "Volume_Ratio", "Avg_Value_20", "Recent_20_High", "Recent_20_Low",
         "Reasons",
     ]
-    render_table(result_df, cols)
+    render_table(result_df, cols, height=260)
+    render_fundamentals_panel(
+        result_df,
+        st.session_state.market_data,
+        st.session_state.stock_dict,
+        key_prefix="single",
+    )
 
 
 def main():
