@@ -4,4 +4,5 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python stock_web.py
+    startCommand: python -u stock_web.py
+    healthCheckPath: /api/status

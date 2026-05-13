@@ -486,7 +486,25 @@
       setBusy(true);
       try {
         const response = await fetch(path, { cache: "no-store" });
-        const data = await response.json();
+        const contentType = response.headers.get("content-type") || "";
+        const bodyText = await response.text();
+
+        if (!contentType.includes("application/json")) {
+          const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 180);
+          throw new Error(
+            `API ${path} 回傳的不是 JSON，而是 ${contentType || "未知格式"} ` +
+            `(HTTP ${response.status})。請確認 Render 部署類型是 Web Service，` +
+            `且前端和後端使用同一個服務網址。回應開頭：${preview}`
+          );
+        }
+
+        let data;
+        try {
+          data = JSON.parse(bodyText);
+        } catch (parseError) {
+          throw new Error(`API ${path} 回傳 JSON 格式錯誤：${parseError.message}`);
+        }
+
         if (!data.ok) throw new Error(data.error || "執行失敗");
         setStatus(data.status);
         setLog(data.logs);
