@@ -47,7 +47,10 @@ COMMISSION = 0.001425
 SELL_TAX = 0.003
 
 # 快取資料夾
-CACHE_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "MANUS_CACHE")
+CACHE_DIR = os.environ.get(
+    "CACHE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+)
 CACHE_FILE = os.path.join(CACHE_DIR, f"MANUS_DATA_{BACKTEST_PERIOD}.pkl")
 
 FEATURES = [

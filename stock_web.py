@@ -43,6 +43,19 @@ def ensure_data(force_refresh=False):
     return logs
 
 
+def has_valid_data():
+    return DF_ALL is not None and not DF_ALL.empty and "Date" in DF_ALL.columns
+
+
+def data_load_error_response(handler, logs=""):
+    json_response(handler, {
+        "ok": False,
+        "error": "Data was not loaded. Click refresh cache first. If it still fails, check Render Logs for yfinance or TWSE download errors.",
+        "status": data_status(),
+        "logs": logs,
+    }, status=500)
+
+
 def clean_value(value):
     if pd.isna(value):
         return None
@@ -178,12 +191,15 @@ def data_status():
             "topN": stock_1.TOP_N,
         }
 
+    has_date = "Date" in DF_ALL.columns
+    has_ticker = "Ticker" in DF_ALL.columns
+
     return {
-        "loaded": True,
+        "loaded": has_date,
         "rows": int(len(DF_ALL)),
-        "stocks": int(DF_ALL["Ticker"].nunique()),
-        "startDate": clean_value(DF_ALL["Date"].min()),
-        "endDate": clean_value(DF_ALL["Date"].max()),
+        "stocks": int(DF_ALL["Ticker"].nunique()) if has_ticker else 0,
+        "startDate": clean_value(DF_ALL["Date"].min()) if has_date else None,
+        "endDate": clean_value(DF_ALL["Date"].max()) if has_date else None,
         "topN": stock_1.TOP_N,
     }
 
@@ -318,6 +334,9 @@ class StockHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/scan":
                 logs = ensure_data(force_refresh=False)
+                if not has_valid_data():
+                    data_load_error_response(self, logs)
+                    return
                 df, run_logs = capture_output(stock_1.run_today_scan, DF_ALL)
                 rows = attach_fundamentals(frame_to_records(df, limit=20))
                 json_response(self, {
@@ -335,6 +354,9 @@ class StockHandler(BaseHTTPRequestHandler):
                     return
 
                 logs = ensure_data(force_refresh=False)
+                if not has_valid_data():
+                    data_load_error_response(self, logs)
+                    return
                 df, run_logs = capture_output(
                     stock_1.run_historical_signal_test,
                     DF_ALL,
@@ -364,6 +386,9 @@ class StockHandler(BaseHTTPRequestHandler):
                     return
 
                 logs = ensure_data(force_refresh=False)
+                if not has_valid_data():
+                    data_load_error_response(self, logs)
+                    return
                 df, run_logs = capture_output(stock_1.analyze_single_stock, DF_ALL, code)
                 json_response(self, {
                     "ok": True,
@@ -375,6 +400,9 @@ class StockHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/refresh":
                 logs = ensure_data(force_refresh=True)
+                if not has_valid_data():
+                    data_load_error_response(self, logs)
+                    return
                 json_response(self, {
                     "ok": True,
                     "status": data_status(),
