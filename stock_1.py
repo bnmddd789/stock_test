@@ -29,10 +29,11 @@ print("=" * 80)
 # ==========================================
 # 參數設定
 # ==========================================
-BACKTEST_PERIOD = "3y"
-SCAN_PERIOD = "120d"
-TOP_N = 20
-BATCH_SIZE = 40
+BACKTEST_PERIOD = os.environ.get("BACKTEST_PERIOD", "3y")
+SCAN_PERIOD = os.environ.get("SCAN_PERIOD", "120d")
+TOP_N = int(os.environ.get("TOP_N", "20"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
+YF_THREADS = os.environ.get("YF_THREADS", "0").lower() in ("1", "true", "yes")
 CAPITAL_PER_STOCK = 100_000
 BENCHMARK_TICKER = "00631L.TW"   # 0050 正2
 BENCHMARK_NAME = "0050正2"
@@ -415,7 +416,7 @@ def download_all_data(stock_dict, period):
                 group_by='ticker',
                 auto_adjust=True,
                 progress=False,
-                threads=True
+                threads=YF_THREADS
             )
 
             for ticker in batch:

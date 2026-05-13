@@ -470,14 +470,18 @@
     }
 
     function setStatus(status) {
+      const loading = status?.loading;
+      const loadingPill = loading?.running ? `<span class="pill">背景載入中</span>` : "";
+
       if (!status || !status.loaded) {
-        statusEl.innerHTML = `<span class="pill">尚未載入資料</span><span class="pill">TopN ${status?.topN ?? 20}</span>`;
+        statusEl.innerHTML = `<span class="pill">尚未載入資料</span>${loadingPill}<span class="pill">TopN ${status?.topN ?? 20}</span>`;
         return;
       }
 
       statusEl.innerHTML = `
         <span class="pill">${status.startDate} ~ ${status.endDate}</span>
         <span class="pill">${fmt(status.stocks, 0)} 檔</span>
+        ${loadingPill}
         <span class="pill">TopN ${status.topN}</span>
       `;
     }
@@ -554,6 +558,10 @@
 
     function renderEmpty(target, text) {
       target.innerHTML = `<div class="panel empty">${text}</div>`;
+    }
+
+    function renderLoading(target) {
+      renderEmpty(target, "資料正在背景載入中，第一次部署可能需要幾分鐘。請稍後再按一次。");
     }
 
     function renderStockCards(target, rows) {
@@ -680,12 +688,20 @@
     document.querySelector("#scanBtn").addEventListener("click", async () => {
       scanResult.innerHTML = `<div class="panel empty">掃描中...</div>`;
       const data = await callApi("/api/scan");
+      if (data.loading) {
+        renderLoading(scanResult);
+        return;
+      }
       renderStockCards(scanResult, data.rows);
     });
 
     document.querySelector("#refreshBtn").addEventListener("click", async () => {
       scanResult.innerHTML = `<div class="panel empty">更新資料中...</div>`;
-      await callApi("/api/refresh");
+      const data = await callApi("/api/refresh");
+      if (data.loading) {
+        renderEmpty(scanResult, "正在背景更新快取，請稍後再按掃描最新。");
+        return;
+      }
       renderEmpty(scanResult, "快取已更新，請按掃描最新");
     });
 
@@ -694,6 +710,10 @@
       historySummary.innerHTML = "";
       historyResult.innerHTML = `<div class="panel empty">驗證中...</div>`;
       const data = await callApi(`/api/history?date=${encodeURIComponent(date)}`);
+      if (data.loading) {
+        renderLoading(historyResult);
+        return;
+      }
       renderHistoryComparison(data.comparison);
       renderHistoryCards(data.rows);
     });
@@ -710,6 +730,10 @@
       const code = document.querySelector("#stockCode").value.trim();
       singleResult.innerHTML = `<div class="panel empty">分析中...</div>`;
       const data = await callApi(`/api/single?code=${encodeURIComponent(code)}`);
+      if (data.loading) {
+        renderLoading(singleResult);
+        return;
+      }
       renderSingle(data.rows);
     });
 

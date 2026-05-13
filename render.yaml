@@ -6,3 +6,10 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python -u stock_web.py
     healthCheckPath: /api/status
+    envVars:
+      - key: BATCH_SIZE
+        value: "10"
+      - key: YF_THREADS
+        value: "0"
+      - key: FETCH_ONLINE_FUNDAMENTALS
+        value: "0"

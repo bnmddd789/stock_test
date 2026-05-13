@@ -3,6 +3,9 @@ import contextlib
 import io
 import json
 import os
+import threading
+import traceback
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -16,10 +19,20 @@ import stock_1
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 8765))
 WEB_FILE = Path(__file__).with_name("stock_mobile.html")
+FETCH_ONLINE_FUNDAMENTALS = os.environ.get("FETCH_ONLINE_FUNDAMENTALS", "0") == "1"
 
 DF_ALL = None
 STOCK_DICT = None
 FUNDAMENTAL_CACHE = {}
+LOAD_LOCK = threading.Lock()
+LOAD_STATE = {
+    "running": False,
+    "startedAt": None,
+    "finishedAt": None,
+    "forceRefresh": False,
+    "error": None,
+    "logs": "",
+}
 
 
 def capture_output(func, *args, **kwargs):
@@ -27,6 +40,25 @@ def capture_output(func, *args, **kwargs):
     with contextlib.redirect_stdout(buffer):
         result = func(*args, **kwargs)
     return result, buffer.getvalue()
+
+
+def utc_now_text():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def get_load_state(include_logs=False):
+    with LOAD_LOCK:
+        state = dict(LOAD_STATE)
+
+    if not include_logs:
+        state.pop("logs", None)
+
+    return state
+
+
+def set_load_state(**updates):
+    with LOAD_LOCK:
+        LOAD_STATE.update(updates)
 
 
 def ensure_data(force_refresh=False):
@@ -45,6 +77,92 @@ def ensure_data(force_refresh=False):
 
 def has_valid_data():
     return DF_ALL is not None and not DF_ALL.empty and "Date" in DF_ALL.columns
+
+
+def loading_message(started=False):
+    state = get_load_state(include_logs=True)
+    if state["running"]:
+        return "資料正在背景載入中，請稍後再按一次。第一次部署可能需要幾分鐘。"
+    if state["error"]:
+        return f"資料載入失敗：{state['error']}\n\n{state.get('logs') or ''}".strip()
+    if started:
+        return "已開始背景載入資料，請稍後再按一次。第一次部署可能需要幾分鐘。"
+    return state.get("logs") or ""
+
+
+def data_loading_response(handler, rows=None, comparison=None, status=202):
+    json_response(handler, {
+        "ok": True,
+        "loading": True,
+        "status": data_status(),
+        "rows": rows or [],
+        "comparison": comparison or [],
+        "logs": loading_message(),
+    }, status=status)
+
+
+def data_load_failed_response(handler):
+    state = get_load_state(include_logs=True)
+    json_response(handler, {
+        "ok": False,
+        "error": state["error"] or "資料載入失敗，請查看 Render Logs。",
+        "status": data_status(),
+        "logs": state.get("logs") or "",
+    }, status=500)
+
+
+def data_load_worker(force_refresh=False):
+    global DF_ALL, STOCK_DICT
+
+    logs = ""
+    error = None
+
+    try:
+        (df_all, stock_dict), logs = capture_output(
+            stock_1.prepare_data,
+            force_refresh=force_refresh
+        )
+        DF_ALL = df_all
+        STOCK_DICT = stock_dict
+
+        if not has_valid_data():
+            error = "資料載入完成，但沒有取得可用資料。"
+    except Exception as exc:
+        error = str(exc)
+        logs = f"{logs}\n\n{traceback.format_exc()}".strip()
+
+    set_load_state(
+        running=False,
+        finishedAt=utc_now_text(),
+        error=error,
+        logs=logs[-12000:],
+    )
+
+
+def start_data_load(force_refresh=False):
+    if has_valid_data() and not force_refresh:
+        return False
+
+    with LOAD_LOCK:
+        if LOAD_STATE["running"]:
+            return False
+
+        LOAD_STATE.update({
+            "running": True,
+            "startedAt": utc_now_text(),
+            "finishedAt": None,
+            "forceRefresh": force_refresh,
+            "error": None,
+            "logs": "",
+        })
+
+    thread = threading.Thread(
+        target=data_load_worker,
+        kwargs={"force_refresh": force_refresh},
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 def data_load_error_response(handler, logs=""):
@@ -141,28 +259,29 @@ def get_fundamentals(ticker):
         "Website": None,
     }
 
-    try:
-        ticker_obj = stock_1.yf.Ticker(ticker)
-        info = ticker_obj.info or {}
+    if FETCH_ONLINE_FUNDAMENTALS:
+        try:
+            ticker_obj = stock_1.yf.Ticker(ticker)
+            info = ticker_obj.info or {}
 
-        dividend_yield = info.get("dividendYield")
-        if dividend_yield is not None and dividend_yield <= 1:
-            dividend_yield = dividend_yield * 100
+            dividend_yield = info.get("dividendYield")
+            if dividend_yield is not None and dividend_yield <= 1:
+                dividend_yield = dividend_yield * 100
 
-        result.update({
-            "Industry": info.get("industry") or result["Industry"],
-            "Sector": info.get("sector") or result["Sector"],
-            "Business": compact_text(info.get("longBusinessSummary")),
-            "MarketCap": clean_value(info.get("marketCap")),
-            "PE": clean_value(info.get("trailingPE")),
-            "ForwardPE": clean_value(info.get("forwardPE")),
-            "PB": clean_value(info.get("priceToBook")),
-            "EPS": clean_value(info.get("trailingEps")),
-            "DividendYield_%": clean_value(dividend_yield),
-            "Website": info.get("website"),
-        })
-    except Exception:
-        pass
+            result.update({
+                "Industry": info.get("industry") or result["Industry"],
+                "Sector": info.get("sector") or result["Sector"],
+                "Business": compact_text(info.get("longBusinessSummary")),
+                "MarketCap": clean_value(info.get("marketCap")),
+                "PE": clean_value(info.get("trailingPE")),
+                "ForwardPE": clean_value(info.get("forwardPE")),
+                "PB": clean_value(info.get("priceToBook")),
+                "EPS": clean_value(info.get("trailingEps")),
+                "DividendYield_%": clean_value(dividend_yield),
+                "Website": info.get("website"),
+            })
+        except Exception:
+            pass
 
     if not result["Business"]:
         industry = result["Industry"] or "產業分類暫無資料"
@@ -185,6 +304,8 @@ def attach_fundamentals(records):
 
 
 def data_status():
+    load_state = get_load_state(include_logs=False)
+
     if DF_ALL is None or DF_ALL.empty:
         return {
             "loaded": False,
@@ -193,6 +314,7 @@ def data_status():
             "startDate": None,
             "endDate": None,
             "topN": stock_1.TOP_N,
+            "loading": load_state,
         }
 
     has_date = "Date" in DF_ALL.columns
@@ -205,6 +327,7 @@ def data_status():
         "startDate": clean_value(DF_ALL["Date"].min()) if has_date else None,
         "endDate": clean_value(DF_ALL["Date"].max()) if has_date else None,
         "topN": stock_1.TOP_N,
+        "loading": load_state,
     }
 
 
@@ -333,13 +456,17 @@ class StockHandler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/api/status":
-                json_response(self, {"ok": True, "status": data_status()})
+                json_response(self, {
+                    "ok": True,
+                    "status": data_status(),
+                    "logs": loading_message(),
+                })
                 return
 
             if parsed.path == "/api/scan":
-                logs = ensure_data(force_refresh=False)
                 if not has_valid_data():
-                    data_load_error_response(self, logs)
+                    start_data_load(force_refresh=False)
+                    data_loading_response(self)
                     return
                 df, run_logs = capture_output(stock_1.run_today_scan, DF_ALL)
                 rows = attach_fundamentals(frame_to_records(df, limit=20))
@@ -347,7 +474,7 @@ class StockHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "status": data_status(),
                     "rows": rows,
-                    "logs": logs + run_logs,
+                    "logs": run_logs,
                 })
                 return
 
@@ -357,9 +484,9 @@ class StockHandler(BaseHTTPRequestHandler):
                     json_response(self, {"ok": False, "error": "請輸入日期"}, status=400)
                     return
 
-                logs = ensure_data(force_refresh=False)
                 if not has_valid_data():
-                    data_load_error_response(self, logs)
+                    start_data_load(force_refresh=False)
+                    data_loading_response(self)
                     return
                 df, run_logs = capture_output(
                     stock_1.run_historical_signal_test,
@@ -379,7 +506,7 @@ class StockHandler(BaseHTTPRequestHandler):
                     "status": data_status(),
                     "rows": attach_fundamentals(frame_to_records(df)),
                     "comparison": comparison,
-                    "logs": logs + run_logs,
+                    "logs": run_logs,
                 })
                 return
 
@@ -389,29 +516,27 @@ class StockHandler(BaseHTTPRequestHandler):
                     json_response(self, {"ok": False, "error": "請輸入股票代號"}, status=400)
                     return
 
-                logs = ensure_data(force_refresh=False)
                 if not has_valid_data():
-                    data_load_error_response(self, logs)
+                    start_data_load(force_refresh=False)
+                    data_loading_response(self)
                     return
                 df, run_logs = capture_output(stock_1.analyze_single_stock, DF_ALL, code)
                 json_response(self, {
                     "ok": True,
                     "status": data_status(),
                     "rows": attach_fundamentals(frame_to_records(df)),
-                    "logs": logs + run_logs,
+                    "logs": run_logs,
                 })
                 return
 
             if parsed.path == "/api/refresh":
-                logs = ensure_data(force_refresh=True)
-                if not has_valid_data():
-                    data_load_error_response(self, logs)
-                    return
+                start_data_load(force_refresh=True)
                 json_response(self, {
                     "ok": True,
+                    "loading": True,
                     "status": data_status(),
-                    "logs": logs,
-                })
+                    "logs": loading_message(started=True),
+                }, status=202)
                 return
 
             text_response(self, "Not found", "text/plain; charset=utf-8", status=404)
