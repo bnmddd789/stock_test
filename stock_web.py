@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,7 +14,7 @@ import stock_1
 
 
 HOST = "0.0.0.0"
-PORT = 8765
+PORT = int(os.environ.get("PORT", 8765))
 WEB_FILE = Path(__file__).with_name("stock_mobile.html")
 
 DF_ALL = None
