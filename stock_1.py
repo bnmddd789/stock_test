@@ -186,6 +186,51 @@ def get_tw_stock_list():
         except Exception as e:
             print(f"Failed to load {label} stocks from TWSE OpenAPI: {e}")
 
+    if stock_dict:
+        return stock_dict
+
+    print("TWSE OpenAPI returned no stocks; trying FinMind TaiwanStockInfo...")
+    try:
+        res = requests.get(
+            "https://api.finmindtrade.com/api/v4/data",
+            headers=headers,
+            params={"dataset": "TaiwanStockInfo"},
+            timeout=30,
+            verify=False
+        )
+        res.raise_for_status()
+        payload = res.json()
+        rows = payload.get("data", [])
+        added = 0
+
+        for row in rows:
+            code = str(row.get("stock_id", "")).strip()
+            name = str(row.get("stock_name", "")).strip()
+            market = str(row.get("type", "")).strip().lower()
+            industry = str(row.get("industry_category", "")).strip()
+
+            if market == "twse":
+                suffix = ".TW"
+            elif market in ["tpex", "otc"]:
+                suffix = ".TWO"
+            else:
+                continue
+
+            if not (code.isdigit() and len(code) == 4 and name):
+                continue
+            if industry.upper() in ["ETF", "ETN"]:
+                continue
+
+            stock_dict[f"{code}{suffix}"] = {
+                "name": name,
+                "ind": industry or market,
+            }
+            added += 1
+
+        print(f"Loaded {added} stocks from FinMind TaiwanStockInfo.")
+    except Exception as e:
+        print(f"Failed to load stocks from FinMind TaiwanStockInfo: {e}")
+
     if not stock_dict:
         print("Remote stock list sources failed; using built-in fallback list.")
         fallback_stocks = {
