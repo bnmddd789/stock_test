@@ -37,6 +37,14 @@ YF_THREADS = os.environ.get("YF_THREADS", "0").lower() in ("1", "true", "yes")
 CAPITAL_PER_STOCK = 100_000
 BENCHMARK_TICKER = "00631L.TW"   # 0050 正2
 BENCHMARK_NAME = "0050正2"
+MARKET_RISK_TICKER = os.environ.get("MARKET_RISK_TICKER", "0050.TW")
+MARKET_RISK_NAME = os.environ.get("MARKET_RISK_NAME", "0050")
+PORTFOLIO_CAPITAL = float(os.environ.get("PORTFOLIO_CAPITAL", "500000"))
+RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "0.02"))
+MAX_ENTRY_GAP_PCT = float(os.environ.get("MAX_ENTRY_GAP_PCT", "5"))
+AGGRESSIVE_TOP_N = int(os.environ.get("AGGRESSIVE_TOP_N", "5"))
+TECHNICAL_SCORE_WEIGHT = float(os.environ.get("TECHNICAL_SCORE_WEIGHT", "0.8"))
+INSTITUTION_SCORE_WEIGHT = float(os.environ.get("INSTITUTION_SCORE_WEIGHT", "0.2"))
 SAVE_CSV_OUTPUT = False
 # 成交量 / 成交金額門檻
 # 台股建議先用成交金額，比單純成交量合理
@@ -54,6 +62,53 @@ CACHE_DIR = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 )
 CACHE_FILE = os.path.join(CACHE_DIR, f"MANUS_DATA_{BACKTEST_PERIOD}.pkl")
+
+INDUSTRY_CODE_MAP = {
+    "01": "水泥工業",
+    "02": "食品工業",
+    "03": "塑膠工業",
+    "04": "紡織纖維",
+    "05": "電機機械",
+    "06": "電器電纜",
+    "08": "玻璃陶瓷",
+    "09": "造紙工業",
+    "10": "鋼鐵工業",
+    "11": "橡膠工業",
+    "12": "汽車工業",
+    "14": "建材營造",
+    "15": "航運業",
+    "16": "觀光餐旅",
+    "17": "金融保險",
+    "18": "貿易百貨",
+    "20": "其他業",
+    "21": "化學工業",
+    "22": "生技醫療",
+    "23": "油電燃氣",
+    "24": "半導體業",
+    "25": "電腦及週邊設備",
+    "26": "光電業",
+    "27": "通信網路業",
+    "28": "電子零組件",
+    "29": "電子通路業",
+    "30": "資訊服務業",
+    "31": "其他電子業",
+    "32": "文化創意業",
+    "33": "農業科技",
+    "34": "電子商務",
+    "35": "綠能環保",
+    "36": "數位雲端",
+    "37": "運動休閒",
+    "38": "居家生活",
+}
+
+
+def normalize_industry_name(industry):
+    text = str(industry or "").strip()
+    if not text or text.lower() in ["nan", "none"]:
+        return ""
+
+    code = text.zfill(2) if text.isdigit() else text
+    return INDUSTRY_CODE_MAP.get(code, text)
 
 
 def emit_progress(progress_callback, stage, current=0, total=1, message=""):
@@ -137,6 +192,10 @@ def add_required_benchmark(stock_dict):
         BENCHMARK_TICKER,
         {"name": BENCHMARK_NAME, "ind": "Benchmark"},
     )
+    stock_dict.setdefault(
+        MARKET_RISK_TICKER,
+        {"name": MARKET_RISK_NAME, "ind": "Market Risk Proxy"},
+    )
     return stock_dict
 
 
@@ -175,7 +234,7 @@ def get_tw_stock_list():
                 if code.isdigit() and len(code) == 4 and name:
                     stock_dict[f"{code}{suffix}"] = {
                         "name": name,
-                        "ind": industry or label,
+                        "ind": normalize_industry_name(industry) or label,
                     }
                     added += 1
 
@@ -206,7 +265,7 @@ def get_tw_stock_list():
                 if code.isdigit() and len(code) == 4 and name:
                     stock_dict[f"{code}{suffix}"] = {
                         "name": name,
-                        "ind": industry or label,
+                        "ind": normalize_industry_name(industry) or label,
                     }
                     added += 1
 
@@ -251,7 +310,7 @@ def get_tw_stock_list():
 
             stock_dict[f"{code}{suffix}"] = {
                 "name": name,
-                "ind": industry or market,
+                "ind": normalize_industry_name(industry) or market,
             }
             added += 1
 
@@ -528,6 +587,11 @@ def download_all_data(stock_dict, period, progress_callback=None):
 
     df_all = pd.concat(all_feature_rows, ignore_index=True)
     df_all['Date'] = pd.to_datetime(df_all['Date'])
+    industry_map = {
+        ticker: normalize_industry_name(info.get("ind")) or ""
+        for ticker, info in (stock_dict or {}).items()
+    }
+    df_all["Industry"] = df_all["Ticker"].map(industry_map).fillna("")
 
     return df_all
 
@@ -571,6 +635,22 @@ def load_cache():
             return None, None
 
         df_all['Date'] = pd.to_datetime(df_all['Date'])
+        stock_dict = {
+            ticker: {
+                **(info or {}),
+                "ind": normalize_industry_name((info or {}).get("ind")) or "",
+            }
+            for ticker, info in (stock_dict or {}).items()
+        }
+        if "Ticker" in df_all.columns:
+            industry_map = {
+                ticker: info.get("ind", "")
+                for ticker, info in stock_dict.items()
+            }
+            df_all = df_all.copy()
+            existing = df_all["Industry"] if "Industry" in df_all.columns else ""
+            df_all["Industry"] = df_all["Ticker"].map(industry_map)
+            df_all["Industry"] = df_all["Industry"].fillna(existing).replace("", "")
 
         print(f"💾 已讀取快取資料：{CACHE_FILE}")
         if created_at:
@@ -673,6 +753,118 @@ def build_hint(row):
     return "；".join(hints)
 
 
+def market_risk_status(df_all, as_of_date=None):
+    if df_all is None or df_all.empty:
+        return {
+            "Market_Allowed": True,
+            "Market_Status": "資料不足",
+            "Market_Message": "尚未載入大盤風控資料。",
+        }
+
+    market_df = df_all[df_all["Ticker"] == MARKET_RISK_TICKER].copy()
+    if market_df.empty:
+        market_df = df_all[df_all["Ticker"] == BENCHMARK_TICKER].copy()
+
+    if market_df.empty:
+        return {
+            "Market_Allowed": True,
+            "Market_Status": "未啟用",
+            "Market_Message": f"找不到 {MARKET_RISK_TICKER} 或 {BENCHMARK_TICKER}，暫不阻擋新倉。",
+        }
+
+    market_df = market_df.sort_values("Date").copy()
+    market_df["Date"] = pd.to_datetime(market_df["Date"])
+
+    if as_of_date is not None:
+        as_of = pd.to_datetime(as_of_date)
+        market_df = market_df[market_df["Date"] <= as_of]
+
+    if len(market_df) < 20:
+        return {
+            "Market_Allowed": True,
+            "Market_Status": "資料不足",
+            "Market_Message": "大盤風控資料少於 20 日，暫不阻擋新倉。",
+        }
+
+    market_df["Risk_MA5"] = market_df["Close"].rolling(5).mean()
+    market_df["Risk_MA20"] = market_df["Close"].rolling(20).mean()
+    today = market_df.iloc[-1]
+    yesterday = market_df.iloc[-2]
+
+    daily_return = (today["Close"] / yesterday["Close"] - 1) * 100
+    below_ma20 = today["Close"] < today["Risk_MA20"]
+    panic_drop = daily_return <= -2 and today["Close"] < today["Risk_MA5"]
+    allowed = not (below_ma20 or panic_drop)
+
+    if allowed:
+        status = "綠燈"
+        message = (
+            f"{MARKET_RISK_NAME} 位於月線之上，單日漲跌 {daily_return:.2f}%，"
+            "允許新倉。"
+        )
+    else:
+        status = "紅燈"
+        reasons = []
+        if below_ma20:
+            reasons.append("跌破月線")
+        if panic_drop:
+            reasons.append("單日恐慌下跌且跌破 5MA")
+        message = (
+            f"{MARKET_RISK_NAME} 風控紅燈：{'、'.join(reasons)}。"
+            "建議停止新買進，只管理既有持股。"
+        )
+
+    return {
+        "Market_Allowed": allowed,
+        "Market_Status": status,
+        "Market_Message": message,
+        "Market_Date": today["Date"].date(),
+        "Market_Close": today["Close"],
+        "Market_MA5": today["Risk_MA5"],
+        "Market_MA20": today["Risk_MA20"],
+        "Market_Daily_Return_%": daily_return,
+    }
+
+
+def get_institution_score(day_df):
+    inst_features = [col for col in ["F_Inst_Ratio", "F_Sitc_5D_Count"] if col in day_df.columns]
+    if not inst_features:
+        return pd.Series(50.0, index=day_df.index), "未接法人資料，中性 50 分"
+
+    scores = []
+    for col in inst_features:
+        scores.append(day_df[col].fillna(0).rank(pct=True) * 100)
+
+    score = sum(scores) / len(scores)
+    return score, "法人籌碼分數已納入"
+
+
+def add_trade_plan_columns(df):
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    ma5 = pd.to_numeric(df["MA5"], errors="coerce")
+    ma20 = pd.to_numeric(df["MA20"], errors="coerce")
+    stop_loss = pd.concat([ma20, close * 0.92], axis=1).max(axis=1)
+    stop_loss = stop_loss.where(stop_loss < close, close * 0.92)
+    risk_per_share = (close - stop_loss).clip(lower=0.01)
+    risk_budget = PORTFOLIO_CAPITAL * RISK_PER_TRADE_PCT
+    raw_shares = np.floor(risk_budget / risk_per_share)
+    round_lot_shares = np.floor(raw_shares / 1000) * 1000
+    suggested_shares = np.where(round_lot_shares >= 1000, round_lot_shares, raw_shares)
+    suggested_capital = np.minimum(suggested_shares * close, CAPITAL_PER_STOCK)
+
+    df["Stop_Loss_Price"] = stop_loss
+    df["Risk_Per_Share"] = risk_per_share
+    df["Suggested_Shares"] = suggested_shares
+    df["Suggested_Capital"] = suggested_capital
+    df["Max_Buy_Price"] = close * (1 + MAX_ENTRY_GAP_PCT / 100)
+    df["Exit_Rule"] = "跌破MA5減碼；跌破MA20或虧損達停損價出場；開高超過上限不追"
+    return df
+
+
 # ==========================================
 # 每日評分
 # ==========================================
@@ -680,7 +872,9 @@ def score_one_day(day_df):
     day_df = day_df.copy()
 
     if "Ticker" in day_df.columns:
-        day_df = day_df[day_df["Ticker"] != BENCHMARK_TICKER].copy()
+        day_df = day_df[
+            ~day_df["Ticker"].isin([BENCHMARK_TICKER, MARKET_RISK_TICKER])
+        ].copy()
 
     day_df = day_df.dropna(subset=FEATURES + [
         'Close',
@@ -712,6 +906,35 @@ def score_one_day(day_df):
         day_df['AI_Score'] += day_df[f + '_Rank'] * w
 
     day_df['AI_Score'] = day_df['AI_Score'] / sum(WEIGHTS) * 100
+    institution_score, institution_note = get_institution_score(day_df)
+    day_df["Institution_Score"] = institution_score
+    day_df["Institution_Note"] = institution_note
+    day_df["Integrated_Score"] = (
+        day_df["AI_Score"] * TECHNICAL_SCORE_WEIGHT
+        + day_df["Institution_Score"] * INSTITUTION_SCORE_WEIGHT
+    )
+    day_df["Stage2_Trend_OK"] = (
+        (day_df["MA5"] > day_df["MA20"])
+        & (day_df["MA20"] > day_df["MA60"])
+        & (day_df["F_ROC_10"] > 0)
+    )
+    day_df["Aggressive_Eligible"] = day_df["Stage2_Trend_OK"]
+    day_df["Aggressive_Rank"] = np.nan
+
+    eligible_idx = day_df.index[day_df["Aggressive_Eligible"]]
+    if len(eligible_idx) > 0:
+        day_df.loc[eligible_idx, "Aggressive_Rank"] = day_df.loc[
+            eligible_idx, "Integrated_Score"
+        ].rank(ascending=False, method="min")
+
+    day_df["Aggressive_Tier"] = ""
+    day_df.loc[day_df["Aggressive_Rank"] <= 3, "Aggressive_Tier"] = "Top3"
+    day_df.loc[
+        (day_df["Aggressive_Rank"] > 3)
+        & (day_df["Aggressive_Rank"] <= AGGRESSIVE_TOP_N),
+        "Aggressive_Tier",
+    ] = f"Top{AGGRESSIVE_TOP_N}"
+    day_df = add_trade_plan_columns(day_df)
 
     if not day_df.empty:
         day_df['Hint'] = day_df.apply(build_hint, axis=1)
@@ -726,6 +949,9 @@ def run_today_scan(df_all):
     print("🧠 執行最新一日 AI 權重運算與全市場排名...")
 
     latest_date = df_all['Date'].max()
+    market_risk = market_risk_status(df_all, latest_date)
+    print(f"🚦 大盤風控：{market_risk['Market_Status']}｜{market_risk['Market_Message']}")
+
     latest_df = df_all[df_all['Date'].dt.date == latest_date.date()].copy()
 
     if latest_df.empty:
@@ -738,7 +964,11 @@ def run_today_scan(df_all):
         print("❌ 最新日沒有符合成交量與 MA5 條件的標的。")
         return pd.DataFrame()
 
-    top20 = scored.sort_values(by='AI_Score', ascending=False).head(20)
+    top20 = scored.sort_values(by='AI_Score', ascending=False).head(20).copy()
+    top20["Rank"] = range(1, len(top20) + 1)
+
+    for key, value in market_risk.items():
+        top20[key] = value
 
     print("\n" + "=" * 100)
     print(f" 🎯 最新交易日 AI 動能極限妖股 TOP 20：{latest_date.date()}")
@@ -757,6 +987,42 @@ def run_today_scan(df_all):
     print("=" * 100)
 
     return top20
+
+
+def run_aggressive_scan(df_all, top_n=AGGRESSIVE_TOP_N):
+    print("🔥 執行強勢攻擊名單掃描...")
+
+    latest_date = df_all['Date'].max()
+    market_risk = market_risk_status(df_all, latest_date)
+    latest_df = df_all[df_all['Date'].dt.date == latest_date.date()].copy()
+    scored = score_one_day(latest_df)
+
+    if scored.empty:
+        print("❌ 最新日沒有符合攻擊名單條件的標的。")
+        return pd.DataFrame()
+
+    aggressive = scored[scored["Aggressive_Eligible"]].copy()
+    if aggressive.empty:
+        print("❌ 沒有通過多頭排列與動能條件的攻擊名單。")
+        return pd.DataFrame()
+
+    aggressive = aggressive.sort_values(
+        by=["Integrated_Score", "AI_Score"],
+        ascending=False
+    ).head(top_n).copy()
+    aggressive["Attack_Rank"] = range(1, len(aggressive) + 1)
+
+    for key, value in market_risk.items():
+        aggressive[key] = value
+
+    print(f"🔥 強勢攻擊 Top {top_n}：")
+    for _, row in aggressive.iterrows():
+        print(
+            f"{int(row['Attack_Rank']):<2} {row['ID']} {row['Name']} "
+            f"整合分數={row['Integrated_Score']:.2f} AI={row['AI_Score']:.2f}"
+        )
+
+    return aggressive
 
 def normalize_ticker_input(code):
     """
@@ -797,6 +1063,8 @@ def analyze_single_stock(df_all, code):
 
     latest = stock_df.iloc[-1]
     latest_date = latest['Date']
+    market_risk = market_risk_status(df_all, latest_date)
+    latest_plan = add_trade_plan_columns(pd.DataFrame([latest])).iloc[0]
 
     # 用最新交易日全市場資料計算該股 AI_Score 排名
     latest_market_df = df_all[df_all['Date'].dt.date == latest_date.date()].copy()
@@ -841,12 +1109,22 @@ def analyze_single_stock(df_all, code):
         market_total = len(scored_market)
         market_pr = stock_score_row['Market_PR'] * 100
         hint = stock_score_row['Hint']
+        institution_score = stock_score_row.get('Institution_Score', np.nan)
+        integrated_score = stock_score_row.get('Integrated_Score', ai_score)
+        aggressive_rank = stock_score_row.get('Aggressive_Rank', np.nan)
+        aggressive_tier = stock_score_row.get('Aggressive_Tier', '')
+        stage2_trend_ok = stock_score_row.get('Stage2_Trend_OK', False)
     else:
         ai_score = np.nan
         market_rank = None
         market_total = len(scored_market)
         market_pr = np.nan
         hint = build_hint(latest)
+        institution_score = np.nan
+        integrated_score = np.nan
+        aggressive_rank = np.nan
+        aggressive_tier = ""
+        stage2_trend_ok = False
 
     # ==============================
     # 趨勢評分
@@ -986,6 +1264,7 @@ def analyze_single_stock(df_all, code):
         'Date': latest_date.date(),
         'ID': latest['ID'],
         'Name': latest['Name'],
+        'Industry': latest.get('Industry', ''),
         'Close': close,
         'MA5': ma5,
         'MA20': ma20,
@@ -996,9 +1275,22 @@ def analyze_single_stock(df_all, code):
         'Score_Status': score_status,
         'Score_Reason': score_reason,
         'AI_Score': ai_score,
+        'Institution_Score': institution_score,
+        'Integrated_Score': integrated_score,
+        'Aggressive_Rank': aggressive_rank,
+        'Aggressive_Tier': aggressive_tier,
+        'Stage2_Trend_OK': stage2_trend_ok,
         'Market_Rank': market_rank,
         'Market_Total': market_total,
         'Market_PR_%': market_pr,
+        'Market_Allowed': market_risk.get('Market_Allowed'),
+        'Market_Status': market_risk.get('Market_Status'),
+        'Market_Message': market_risk.get('Market_Message'),
+        'Stop_Loss_Price': latest_plan.get('Stop_Loss_Price'),
+        'Max_Buy_Price': latest_plan.get('Max_Buy_Price'),
+        'Suggested_Capital': latest_plan.get('Suggested_Capital'),
+        'Suggested_Shares': latest_plan.get('Suggested_Shares'),
+        'Exit_Rule': latest_plan.get('Exit_Rule'),
         'ROC_1': latest['ROC_1'],
         'ROC_3': latest['ROC_3'],
         'ROC_5': latest['ROC_5'],
@@ -1171,6 +1463,7 @@ def run_historical_signal_test(
         print(f"⚠️ 你輸入的日期 {target_date.date()} 不是交易日，改用前一個交易日：{signal_date.date()}")
 
     market_entry_date = get_next_trading_date(df_all, signal_date)
+    market_risk = market_risk_status(df_all, signal_date)
 
     if market_entry_date is None:
         print("❌ 找不到下一個交易日資料，無法驗證隔日開盤進場。")
@@ -1215,6 +1508,13 @@ def run_historical_signal_test(
             continue
 
         entry_open = stock_hist.loc[entry_idx, 'Open']
+        entry_gap = (entry_open / row['Close'] - 1) * 100 if row['Close'] else np.nan
+        entry_allowed = entry_gap <= MAX_ENTRY_GAP_PCT if not pd.isna(entry_gap) else False
+        entry_filter = (
+            "可進場"
+            if entry_allowed
+            else f"開盤跳空 {entry_gap:.2f}% 超過 {MAX_ENTRY_GAP_PCT:.1f}%，不追"
+        )
 
         # 這檔股票從進場日開始，最多可以驗證幾個交易日
         max_available_days = len(stock_hist) - entry_idx - 1
@@ -1224,11 +1524,15 @@ def run_historical_signal_test(
             'Entry_Date': entry_date.date(),
             'ID': row['ID'],
             'Name': row['Name'],
+            'Industry': row.get('Industry', ''),
             'Rank': None,
             'Signal_Close': row['Close'],
             'Signal_MA5': row['MA5'],
             'AI_Score': row['AI_Score'],
             'Entry_Open': entry_open,
+            'Entry_Gap_%': entry_gap,
+            'Entry_Filter': entry_filter,
+            'Entry_Allowed': entry_allowed,
             'Invest_Amount': capital_per_stock,
             'Max_Available_Days': max_available_days,
             'Avg_Value_20': row['Avg_Value_20'],
@@ -1236,6 +1540,18 @@ def run_historical_signal_test(
             'ROC_3': row['ROC_3'],
             'ROC_5': row['ROC_5'],
             'ROC_10': row['F_ROC_10'],
+            'Institution_Score': row.get('Institution_Score', np.nan),
+            'Integrated_Score': row.get('Integrated_Score', row['AI_Score']),
+            'Aggressive_Rank': row.get('Aggressive_Rank', np.nan),
+            'Aggressive_Tier': row.get('Aggressive_Tier', ''),
+            'Stage2_Trend_OK': row.get('Stage2_Trend_OK', False),
+            'Stop_Loss_Price': row.get('Stop_Loss_Price', np.nan),
+            'Max_Buy_Price': row.get('Max_Buy_Price', np.nan),
+            'Suggested_Capital': row.get('Suggested_Capital', np.nan),
+            'Exit_Rule': row.get('Exit_Rule', ''),
+            'Market_Allowed': market_risk.get('Market_Allowed'),
+            'Market_Status': market_risk.get('Market_Status'),
+            'Market_Message': market_risk.get('Market_Message'),
             'Consecutive_Limit_Up_Like': row['Consecutive_Limit_Up_Like'],
             'Hint': row['Hint'],
         }
