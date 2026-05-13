@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>股票雷達</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #667085;
+      --line: #d9dee7;
+      --accent: #0f766e;
+      --accent-2: #1d4ed8;
+      --warn: #b45309;
+      --bad: #b42318;
+      --good: #067647;
+      --shadow: 0 10px 28px rgba(31, 41, 51, .08);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-size: 16px;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(246, 247, 249, .96);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .topbar {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 14px 16px 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 21px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .status {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+
+    nav {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .tab {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .tab.active {
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }
+
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    section { display: none; }
+    section.active { display: block; }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 10px;
+    }
+
+    label {
+      color: var(--muted);
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    input {
+      width: 100%;
+      min-height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 16px;
+      color: var(--ink);
+      background: #fff;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      min-height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 800;
+      touch-action: manipulation;
+    }
+
+    button.primary {
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }
+
+    button.secondary {
+      color: #fff;
+      border-color: var(--accent-2);
+      background: var(--accent-2);
+    }
+
+    button:disabled {
+      opacity: .55;
+    }
+
+    .cards {
+      display: grid;
+      gap: 10px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .card-head {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .rank {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: #e7f6f2;
+      color: var(--accent);
+      font-weight: 900;
+    }
+
+    .name {
+      min-width: 0;
+    }
+
+    .name strong {
+      display: block;
+      font-size: 18px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+
+    .name span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 2px;
+    }
+
+    .score {
+      text-align: right;
+      font-weight: 900;
+      color: var(--accent-2);
+      white-space: nowrap;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      min-height: 58px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 3px;
+      font-size: 15px;
+      overflow-wrap: anywhere;
+    }
+
+    .hint {
+      margin-top: 10px;
+      color: var(--warn);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .fundamental {
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+
+    .fund-title {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 900;
+      margin-bottom: 8px;
+    }
+
+    .business {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      margin-top: 8px;
+    }
+
+    .single-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .comparison {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .compare-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .compare-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .compare-head strong {
+      font-size: 17px;
+    }
+
+    .winner {
+      border-radius: 8px;
+      padding: 4px 8px;
+      background: #e7f6f2;
+      color: var(--good);
+      font-size: 13px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .log {
+      white-space: pre-wrap;
+      overflow: auto;
+      max-height: 280px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: #344054;
+      background: #f1f3f6;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 24px 8px;
+    }
+
+    .error {
+      color: var(--bad);
+      font-weight: 800;
+    }
+
+    @media (min-width: 760px) {
+      .topbar {
+        grid-template-columns: 1fr auto;
+        align-items: center;
+      }
+
+      nav {
+        width: 430px;
+      }
+
+      .controls {
+        grid-template-columns: 1fr auto;
+        align-items: end;
+      }
+
+      .actions {
+        width: 300px;
+      }
+
+      .cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .comparison {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>股票雷達</h1>
+        <div class="status" id="status">
+          <span class="pill">尚未載入資料</span>
+        </div>
+      </div>
+      <nav aria-label="功能切換">
+        <button class="tab active" data-tab="scan">Top20</button>
+        <button class="tab" data-tab="history">歷史</button>
+        <button class="tab" data-tab="single">單股</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section id="scan" class="active">
+      <div class="panel">
+        <div class="actions">
+          <button class="primary" id="scanBtn">掃描最新</button>
+          <button id="refreshBtn">更新快取</button>
+        </div>
+      </div>
+      <div id="scanResult" class="cards"></div>
+    </section>
+
+    <section id="history">
+      <div class="panel controls">
+        <label>
+          回放日期
+          <input id="historyDate" inputmode="numeric" placeholder="2026/04/13">
+        </label>
+        <div class="actions">
+          <button class="primary" id="historyBtn">驗證 Top20</button>
+          <button id="todayFillBtn">填今天</button>
+        </div>
+      </div>
+      <div id="historySummary" class="comparison"></div>
+      <div id="historyResult" class="cards"></div>
+    </section>
+
+    <section id="single">
+      <div class="panel controls">
+        <label>
+          股票代號
+          <input id="stockCode" inputmode="numeric" placeholder="2330 或 6187">
+        </label>
+        <div class="actions">
+          <button class="primary" id="singleBtn">分析</button>
+          <button id="clearBtn">清除</button>
+        </div>
+      </div>
+      <div id="singleResult" class="cards"></div>
+    </section>
+
+    <div class="panel">
+      <strong>執行訊息</strong>
+      <div id="log" class="log">等待操作...</div>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.querySelector("#status");
+    const logEl = document.querySelector("#log");
+    const scanResult = document.querySelector("#scanResult");
+    const historySummary = document.querySelector("#historySummary");
+    const historyResult = document.querySelector("#historyResult");
+    const singleResult = document.querySelector("#singleResult");
+    const buttons = [...document.querySelectorAll("button")];
+
+    function fmt(value, digits = 2) {
+      if (value === null || value === undefined || value === "") return "-";
+      const number = Number(value);
+      if (Number.isFinite(number)) return number.toLocaleString("zh-TW", { maximumFractionDigits: digits });
+      return String(value);
+    }
+
+    function pct(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return String(value);
+      return `${number.toFixed(2)}%`;
+    }
+
+    function setBusy(isBusy) {
+      buttons.forEach(button => button.disabled = isBusy);
+    }
+
+    function setLog(text) {
+      logEl.textContent = text && text.trim() ? text.trim() : "完成";
+    }
+
+    function setStatus(status) {
+      if (!status || !status.loaded) {
+        statusEl.innerHTML = `<span class="pill">尚未載入資料</span><span class="pill">TopN ${status?.topN ?? 20}</span>`;
+        return;
+      }
+
+      statusEl.innerHTML = `
+        <span class="pill">${status.startDate} ~ ${status.endDate}</span>
+        <span class="pill">${fmt(status.stocks, 0)} 檔</span>
+        <span class="pill">TopN ${status.topN}</span>
+      `;
+    }
+
+    async function callApi(path) {
+      setBusy(true);
+      try {
+        const response = await fetch(path, { cache: "no-store" });
+        const data = await response.json();
+        if (!data.ok) throw new Error(data.error || "執行失敗");
+        setStatus(data.status);
+        setLog(data.logs);
+        return data;
+      } catch (error) {
+        setLog(error.message);
+        throw error;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function metric(label, value) {
+      return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
+    }
+
+    function money(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return String(value);
+      if (number >= 1_0000_0000_0000) return `${fmt(number / 1_0000_0000_0000, 2)} 兆`;
+      if (number >= 1_0000_0000) return `${fmt(number / 1_0000_0000, 2)} 億`;
+      if (number >= 10000) return `${fmt(number / 10000, 2)} 萬`;
+      return fmt(number, 0);
+    }
+
+    function renderFundamentals(row) {
+      const fund = row.Fundamentals || {};
+      const industry = fund.Industry || fund.Sector || "-";
+      const business = fund.Business || "暫無公司業務摘要。";
+
+      return `
+        <div class="fundamental">
+          <div class="fund-title">基本面 / 公司做什麼</div>
+          <div class="metrics">
+            ${metric("產業", industry)}
+            ${metric("市值", money(fund.MarketCap))}
+            ${metric("PE", fmt(fund.PE))}
+            ${metric("PB", fmt(fund.PB))}
+            ${metric("EPS", fmt(fund.EPS))}
+            ${metric("殖利率", pct(fund["DividendYield_%"]))}
+          </div>
+          <div class="business">${business}</div>
+        </div>
+      `;
+    }
+
+    function renderEmpty(target, text) {
+      target.innerHTML = `<div class="panel empty">${text}</div>`;
+    }
+
+    function renderStockCards(target, rows) {
+      if (!rows.length) {
+        renderEmpty(target, "沒有符合條件的資料");
+        return;
+      }
+
+      target.innerHTML = rows.map((row, index) => `
+        <article class="card">
+          <div class="card-head">
+            <div class="rank">${row.Rank ?? index + 1}</div>
+            <div class="name">
+              <strong>${row.ID ?? row.Ticker ?? "-"}</strong>
+              <span>${row.Name ?? ""}</span>
+            </div>
+            <div class="score">${fmt(row.AI_Score)}</div>
+          </div>
+          <div class="metrics">
+            ${metric("收盤 / 進場", fmt(row.Close ?? row.Entry_Open))}
+            ${metric("20日均額", row.Avg_Value_20 ? `${fmt(row.Avg_Value_20 / 10000, 0)} 萬` : "-")}
+            ${metric("量比", fmt(row.Volume_Ratio))}
+            ${metric("近10日", pct(row.ROC_10 ?? row.F_ROC_10))}
+          </div>
+          ${renderFundamentals(row)}
+          ${row.Hint ? `<div class="hint">${row.Hint}</div>` : ""}
+        </article>
+      `).join("");
+    }
+
+    function renderHistoryCards(rows) {
+      if (!rows.length) {
+        renderEmpty(historyResult, "沒有可驗證的 Top20 資料");
+        return;
+      }
+
+      historyResult.innerHTML = rows.map((row, index) => `
+        <article class="card">
+          <div class="card-head">
+            <div class="rank">${row.Rank ?? index + 1}</div>
+            <div class="name">
+              <strong>${row.ID ?? "-"}</strong>
+              <span>${row.Name ?? ""} | ${row.Entry_Date ?? ""}</span>
+            </div>
+            <div class="score">${fmt(row.AI_Score)}</div>
+          </div>
+          <div class="metrics">
+            ${metric("進場開盤", fmt(row.Entry_Open))}
+            ${metric("Day1", pct(row["Day1_Net_Return_%"]))}
+            ${metric("Day7", pct(row["Day7_Net_Return_%"]))}
+            ${metric("Day30", pct(row["Day30_Net_Return_%"]))}
+          </div>
+          ${renderFundamentals(row)}
+          ${row.Hint ? `<div class="hint">${row.Hint}</div>` : ""}
+        </article>
+      `).join("");
+    }
+
+    function renderHistoryComparison(rows) {
+      if (!rows || !rows.length) {
+        historySummary.innerHTML = "";
+        return;
+      }
+
+      historySummary.innerHTML = rows.map(row => `
+        <article class="compare-card">
+          <div class="compare-head">
+            <strong>持有 ${row.days} 日</strong>
+            <span class="winner">${row.winner}</span>
+          </div>
+          <div class="metrics">
+            ${metric("Top20 總報酬", pct(row.strategyReturn))}
+            ${metric(row.benchmarkName || "0050正2", pct(row.benchmarkReturn))}
+            ${metric("差距", pct(row.diffReturn))}
+            ${metric("有效檔數", `${fmt(row.validCount, 0)} 檔`)}
+          </div>
+        </article>
+      `).join("");
+    }
+
+    function renderSingle(rows) {
+      if (!rows.length) {
+        renderEmpty(singleResult, "找不到股票資料");
+        return;
+      }
+
+      const row = rows[0];
+      singleResult.innerHTML = `
+        <article class="card">
+          <div class="card-head">
+            <div class="rank">${row.ID ?? "-"}</div>
+            <div class="name">
+              <strong>${row.Name ?? ""}</strong>
+              <span>${row.Date ?? ""}</span>
+            </div>
+            <div class="score">${fmt(row.AI_Score)}</div>
+          </div>
+          <div class="single-grid">
+            ${metric("收盤", fmt(row.Close))}
+            ${metric("趨勢", row.Trend_View ?? "-")}
+            ${metric("市場排名", row.Market_Rank ? `${row.Market_Rank} / ${row.Market_Total}` : "-")}
+            ${metric("PR", pct(row["Market_PR_%"]))}
+            ${metric("MA5", fmt(row.MA5))}
+            ${metric("MA20", fmt(row.MA20))}
+            ${metric("MA60", fmt(row.MA60))}
+            ${metric("量比", fmt(row.Volume_Ratio))}
+          </div>
+          ${renderFundamentals(row)}
+          ${row.Action_View ? `<div class="hint">${row.Action_View}</div>` : ""}
+          ${row.Hint ? `<div class="hint">${row.Hint}</div>` : ""}
+        </article>
+      `;
+    }
+
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
+        document.querySelectorAll("section").forEach(item => item.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelector(`#${tab.dataset.tab}`).classList.add("active");
+      });
+    });
+
+    document.querySelector("#scanBtn").addEventListener("click", async () => {
+      scanResult.innerHTML = `<div class="panel empty">掃描中...</div>`;
+      const data = await callApi("/api/scan");
+      renderStockCards(scanResult, data.rows);
+    });
+
+    document.querySelector("#refreshBtn").addEventListener("click", async () => {
+      scanResult.innerHTML = `<div class="panel empty">更新資料中...</div>`;
+      await callApi("/api/refresh");
+      renderEmpty(scanResult, "快取已更新，請按掃描最新");
+    });
+
+    document.querySelector("#historyBtn").addEventListener("click", async () => {
+      const date = document.querySelector("#historyDate").value.trim();
+      historySummary.innerHTML = "";
+      historyResult.innerHTML = `<div class="panel empty">驗證中...</div>`;
+      const data = await callApi(`/api/history?date=${encodeURIComponent(date)}`);
+      renderHistoryComparison(data.comparison);
+      renderHistoryCards(data.rows);
+    });
+
+    document.querySelector("#todayFillBtn").addEventListener("click", () => {
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth() + 1).padStart(2, "0");
+      const d = String(now.getDate()).padStart(2, "0");
+      document.querySelector("#historyDate").value = `${y}/${m}/${d}`;
+    });
+
+    document.querySelector("#singleBtn").addEventListener("click", async () => {
+      const code = document.querySelector("#stockCode").value.trim();
+      singleResult.innerHTML = `<div class="panel empty">分析中...</div>`;
+      const data = await callApi(`/api/single?code=${encodeURIComponent(code)}`);
+      renderSingle(data.rows);
+    });
+
+    document.querySelector("#clearBtn").addEventListener("click", () => {
+      document.querySelector("#stockCode").value = "";
+      singleResult.innerHTML = "";
+    });
+
+    callApi("/api/status").catch(() => {});
+  </script>
+</body>
+</html>
