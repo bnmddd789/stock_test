@@ -48,9 +48,13 @@ def has_valid_data():
 
 
 def data_load_error_response(handler, logs=""):
+    message = "Data was not loaded. Click refresh cache first. If it still fails, check Render Logs for yfinance or TWSE download errors."
+    if logs:
+        message = f"{message}\n\n{logs}"
+
     json_response(handler, {
         "ok": False,
-        "error": "Data was not loaded. Click refresh cache first. If it still fails, check Render Logs for yfinance or TWSE download errors.",
+        "error": message,
         "status": data_status(),
         "logs": logs,
     }, status=500)

@@ -240,6 +240,10 @@ def download_all_data(stock_dict, period):
 
     all_tickers = list(stock_dict.keys())
     all_feature_rows = []
+    failed_batches = 0
+    empty_tickers = 0
+    missing_column_tickers = 0
+    short_history_tickers = 0
 
     for i in range(0, len(all_tickers), BATCH_SIZE):
         batch = all_tickers[i:i + BATCH_SIZE]
@@ -266,15 +270,18 @@ def download_all_data(stock_dict, period):
                         df = data.copy()
 
                     if df.empty:
+                        empty_tickers += 1
                         continue
 
                     needed = ['Open', 'High', 'Low', 'Close', 'Volume']
                     if not all(c in df.columns for c in needed):
+                        missing_column_tickers += 1
                         continue
 
                     df = df[needed].dropna()
 
                     if len(df) < 90:
+                        short_history_tickers += 1
                         continue
 
                     feature_df = calc_features(df, ticker, stock_dict[ticker]['name'])
@@ -286,10 +293,18 @@ def download_all_data(stock_dict, period):
                     continue
 
         except Exception as e:
+            failed_batches += 1
             print(f"\n⚠️ 批次下載失敗: {batch[:3]}... error={e}")
             continue
 
     print("\n✅ 歷史資料下載完成！")
+
+    print(
+        f"Download summary: tickers={len(all_tickers)}, "
+        f"feature_frames={len(all_feature_rows)}, failed_batches={failed_batches}, "
+        f"empty_tickers={empty_tickers}, missing_column_tickers={missing_column_tickers}, "
+        f"short_history_tickers={short_history_tickers}"
+    )
 
     if len(all_feature_rows) == 0:
         return pd.DataFrame()
@@ -379,6 +394,7 @@ def prepare_data(force_refresh=False):
             print(f"⚠️ 快取資料偏舊，最新交易日為 {latest_date}，改為重新下載。")
 
     stock_dict = get_tw_stock_list()
+    print(f"Stock list count: {len(stock_dict)}")
     print(f"✅ 取得標的共 {len(stock_dict)} 檔。")
 
     if len(stock_dict) == 0:
