@@ -127,7 +127,7 @@ def get_tw_stock_list():
 
     for url, suffix, label in sources:
         try:
-            res = requests.get(url, headers=headers, timeout=30)
+            res = requests.get(url, headers=headers, timeout=30, verify=False)
             res.raise_for_status()
             res.encoding = "utf-8-sig"
             df = pd.read_csv(StringIO(res.text))
@@ -137,6 +137,12 @@ def get_tw_stock_list():
                 code = str(row.get("公司代號", "")).strip()
                 name = str(row.get("公司簡稱", "")).strip()
                 industry = str(row.get("產業別", "")).strip()
+                if not code and len(row) > 1:
+                    code = str(row.iloc[1]).strip()
+                if not name and len(row) > 3:
+                    name = str(row.iloc[3]).strip()
+                if not industry and len(row) > 5:
+                    industry = str(row.iloc[5]).strip()
 
                 if code.isdigit() and len(code) == 4 and name:
                     stock_dict[f"{code}{suffix}"] = {
@@ -159,7 +165,7 @@ def get_tw_stock_list():
 
     for url, suffix, label in fallback_sources:
         try:
-            res = requests.get(url, headers=headers, timeout=30)
+            res = requests.get(url, headers=headers, timeout=30, verify=False)
             res.raise_for_status()
             rows = res.json()
             added = 0
@@ -179,6 +185,40 @@ def get_tw_stock_list():
             print(f"Loaded {added} {label} stocks from TWSE OpenAPI.")
         except Exception as e:
             print(f"Failed to load {label} stocks from TWSE OpenAPI: {e}")
+
+    if not stock_dict:
+        print("Remote stock list sources failed; using built-in fallback list.")
+        fallback_stocks = {
+            "1101.TW": ("TCC", "fallback"),
+            "1216.TW": ("Uni-President", "fallback"),
+            "1301.TW": ("Formosa Plastics", "fallback"),
+            "1303.TW": ("Nan Ya", "fallback"),
+            "2002.TW": ("China Steel", "fallback"),
+            "2303.TW": ("UMC", "fallback"),
+            "2308.TW": ("Delta", "fallback"),
+            "2317.TW": ("Hon Hai", "fallback"),
+            "2330.TW": ("TSMC", "fallback"),
+            "2357.TW": ("ASUS", "fallback"),
+            "2382.TW": ("Quanta", "fallback"),
+            "2412.TW": ("Chunghwa Telecom", "fallback"),
+            "2454.TW": ("MediaTek", "fallback"),
+            "2603.TW": ("Evergreen Marine", "fallback"),
+            "2615.TW": ("Wan Hai", "fallback"),
+            "2881.TW": ("Fubon Financial", "fallback"),
+            "2882.TW": ("Cathay Financial", "fallback"),
+            "2891.TW": ("CTBC Financial", "fallback"),
+            "3008.TW": ("Largan", "fallback"),
+            "3711.TW": ("ASE Holdings", "fallback"),
+            "5871.TW": ("Chailease-KY", "fallback"),
+            "6505.TW": ("Formosa Petrochemical", "fallback"),
+            "8046.TW": ("Nan Ya PCB", "fallback"),
+            "8069.TWO": ("E Ink", "fallback"),
+            "8299.TWO": ("Phison", "fallback"),
+        }
+        stock_dict = {
+            ticker: {"name": name, "ind": industry}
+            for ticker, (name, industry) in fallback_stocks.items()
+        }
 
     return stock_dict
 
