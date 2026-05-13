@@ -18,6 +18,7 @@ streamlit_app.py
 6. Deploy。
 
 第一次按「掃描最新 Top20」或「載入資料」時，會下載市場資料並建立快取，可能需要幾分鐘。之後同一個 app session 會使用 Streamlit cache，不會每次重抓。
+載入期間會顯示進度條，下載階段會顯示目前已處理的股票檔數。
 
 建議 Streamlit Secrets 或環境變數可保留預設值：
 

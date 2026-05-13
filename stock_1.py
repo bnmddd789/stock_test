@@ -55,6 +55,24 @@ CACHE_DIR = os.environ.get(
 )
 CACHE_FILE = os.path.join(CACHE_DIR, f"MANUS_DATA_{BACKTEST_PERIOD}.pkl")
 
+
+def emit_progress(progress_callback, stage, current=0, total=1, message=""):
+    if progress_callback is None:
+        return
+
+    try:
+        progress_callback(
+            stage=stage,
+            current=current,
+            total=total,
+            message=message,
+        )
+    except TypeError:
+        progress_callback(stage, current, total, message)
+    except Exception:
+        pass
+
+
 FEATURES = [
     'F_Hist_Vol',
     'F_BB_Width',
@@ -394,19 +412,36 @@ def calc_features(df, ticker, name):
 # ==========================================
 # 下載全市場資料
 # ==========================================
-def download_all_data(stock_dict, period):
+def download_all_data(stock_dict, period, progress_callback=None):
     print(f"⛏️ 下載歷史資料 period={period} ...")
 
     all_tickers = list(stock_dict.keys())
+    total_tickers = len(all_tickers)
     all_feature_rows = []
     failed_batches = 0
     empty_tickers = 0
     missing_column_tickers = 0
     short_history_tickers = 0
 
+    emit_progress(
+        progress_callback,
+        "download",
+        0,
+        total_tickers,
+        f"準備下載 {total_tickers} 檔股票歷史資料...",
+    )
+
     for i in range(0, len(all_tickers), BATCH_SIZE):
         batch = all_tickers[i:i + BATCH_SIZE]
-        print(f"   下載進度: {min(i + BATCH_SIZE, len(all_tickers))}/{len(all_tickers)}...", end='\r')
+        batch_end = min(i + BATCH_SIZE, total_tickers)
+        print(f"   下載進度: {batch_end}/{total_tickers}...", end='\r')
+        emit_progress(
+            progress_callback,
+            "download",
+            i,
+            total_tickers,
+            f"下載中：{i}/{total_tickers} 檔，正在處理 {batch[0]} ~ {batch[-1]}",
+        )
 
         try:
             data = yf.download(
@@ -454,9 +489,23 @@ def download_all_data(stock_dict, period):
         except Exception as e:
             failed_batches += 1
             print(f"\n⚠️ 批次下載失敗: {batch[:3]}... error={e}")
-            continue
+
+        emit_progress(
+            progress_callback,
+            "download",
+            batch_end,
+            total_tickers,
+            f"下載進度：{batch_end}/{total_tickers} 檔",
+        )
 
     print("\n✅ 歷史資料下載完成！")
+    emit_progress(
+        progress_callback,
+        "download",
+        total_tickers,
+        total_tickers,
+        "歷史資料下載完成，正在合併特徵資料...",
+    )
 
     print(
         f"Download summary: tickers={len(all_tickers)}, "
@@ -543,30 +592,37 @@ def is_cache_fresh(df_all):
     return len(business_days_after_latest) <= 1
 
 
-def prepare_data(force_refresh=False):
+def prepare_data(force_refresh=False, progress_callback=None):
+    emit_progress(progress_callback, "cache", 0, 1, "檢查本機快取...")
+
     if not force_refresh:
         df_all, stock_dict = load_cache()
         if df_all is not None and not df_all.empty:
             if is_cache_fresh(df_all):
+                emit_progress(progress_callback, "done", 1, 1, "快取仍有效，已完成載入。")
                 return df_all, stock_dict
             latest_date = pd.to_datetime(df_all['Date']).max().date()
             print(f"⚠️ 快取資料偏舊，最新交易日為 {latest_date}，改為重新下載。")
 
+    emit_progress(progress_callback, "stock_list", 0, 1, "下載台股清單...")
     stock_dict = get_tw_stock_list()
     print(f"Stock list count: {len(stock_dict)}")
     print(f"✅ 取得標的共 {len(stock_dict)} 檔。")
+    emit_progress(progress_callback, "stock_list", 1, 1, f"已取得 {len(stock_dict)} 檔股票清單。")
 
     if len(stock_dict) == 0:
         print("❌ 台股清單為 0，請先確認 lxml / html5lib / beautifulsoup4 是否已安裝。")
         return pd.DataFrame(), {}
 
-    df_all = download_all_data(stock_dict, BACKTEST_PERIOD)
+    df_all = download_all_data(stock_dict, BACKTEST_PERIOD, progress_callback=progress_callback)
 
     if df_all.empty:
         print("❌ 沒有足夠資料可以運算。")
         return pd.DataFrame(), {}
 
+    emit_progress(progress_callback, "cache_save", 0, 1, "儲存快取資料...")
     save_cache(df_all, stock_dict)
+    emit_progress(progress_callback, "done", 1, 1, "資料載入完成。")
 
     return df_all, stock_dict
 

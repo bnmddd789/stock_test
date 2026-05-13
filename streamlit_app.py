@@ -32,11 +32,12 @@ def capture_output(func, *args, **kwargs):
 
 
 @st.cache_resource(show_spinner=False)
-def load_market_data(refresh_token=0):
+def load_market_data(refresh_token=0, _progress_callback=None):
     force_refresh = refresh_token > 0
     (df_all, stock_dict), logs = capture_output(
         stock_1.prepare_data,
         force_refresh=force_refresh,
+        progress_callback=_progress_callback,
     )
 
     if df_all is not None and not df_all.empty and "Date" in df_all.columns:
@@ -58,8 +59,39 @@ def init_state():
 
 def get_data():
     st.session_state.data_loaded = True
+    progress_bar = st.progress(0)
+    status_box = st.empty()
+
+    def update_progress(stage, current, total, message):
+        total = max(int(total or 1), 1)
+        current = max(int(current or 0), 0)
+        ratio = min(current / total, 1.0)
+
+        if stage == "cache":
+            progress_value = 0.03 + (0.04 * ratio)
+        elif stage == "stock_list":
+            progress_value = 0.08 + (0.07 * ratio)
+        elif stage == "download":
+            progress_value = 0.15 + (0.78 * ratio)
+        elif stage == "cache_save":
+            progress_value = 0.94 + (0.04 * ratio)
+        elif stage == "done":
+            progress_value = 1.0
+        else:
+            progress_value = ratio
+
+        progress_value = min(progress_value, 1.0)
+        progress_bar.progress(progress_value)
+        status_box.info(f"{progress_value * 100:.0f}%｜{message or '資料處理中...'}")
+
+    update_progress("cache", 0, 1, "準備載入資料...")
     with st.spinner("載入資料中，第一次可能需要幾分鐘..."):
-        df_all, stock_dict, logs = load_market_data(st.session_state.refresh_token)
+        df_all, stock_dict, logs = load_market_data(
+            st.session_state.refresh_token,
+            _progress_callback=update_progress,
+        )
+    progress_bar.progress(1.0)
+    status_box.success("資料載入完成。")
     st.session_state.last_logs = logs
     return df_all, stock_dict, logs
 
