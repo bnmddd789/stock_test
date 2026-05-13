@@ -3,6 +3,7 @@ import sys, os, requests, urllib3
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from io import StringIO
 import yfinance as yf
 import warnings
 import traceback
@@ -110,6 +111,78 @@ def get_tw_stock_list():
 # ==========================================
 # 特徵計算
 # ==========================================
+# Render/cloud-friendly replacement for the stock list loader above.
+def get_tw_stock_list():
+    print("Fetching Taiwan stock list from MOPS open data...")
+    stock_dict = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,application/json,text/plain,*/*",
+    }
+
+    sources = [
+        ("https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv", ".TW", "listed"),
+        ("https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv", ".TWO", "otc"),
+    ]
+
+    for url, suffix, label in sources:
+        try:
+            res = requests.get(url, headers=headers, timeout=30)
+            res.raise_for_status()
+            res.encoding = "utf-8-sig"
+            df = pd.read_csv(StringIO(res.text))
+            added = 0
+
+            for _, row in df.iterrows():
+                code = str(row.get("公司代號", "")).strip()
+                name = str(row.get("公司簡稱", "")).strip()
+                industry = str(row.get("產業別", "")).strip()
+
+                if code.isdigit() and len(code) == 4 and name:
+                    stock_dict[f"{code}{suffix}"] = {
+                        "name": name,
+                        "ind": industry or label,
+                    }
+                    added += 1
+
+            print(f"Loaded {added} {label} stocks from MOPS CSV.")
+        except Exception as e:
+            print(f"Failed to load {label} stocks from MOPS CSV: {e}")
+
+    if stock_dict:
+        return stock_dict
+
+    print("MOPS CSV returned no stocks; trying TWSE OpenAPI fallback...")
+    fallback_sources = [
+        ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", ".TW", "listed"),
+    ]
+
+    for url, suffix, label in fallback_sources:
+        try:
+            res = requests.get(url, headers=headers, timeout=30)
+            res.raise_for_status()
+            rows = res.json()
+            added = 0
+
+            for row in rows:
+                code = str(row.get("公司代號", "")).strip()
+                name = str(row.get("公司簡稱", "")).strip()
+                industry = str(row.get("產業別", "")).strip()
+
+                if code.isdigit() and len(code) == 4 and name:
+                    stock_dict[f"{code}{suffix}"] = {
+                        "name": name,
+                        "ind": industry or label,
+                    }
+                    added += 1
+
+            print(f"Loaded {added} {label} stocks from TWSE OpenAPI.")
+        except Exception as e:
+            print(f"Failed to load {label} stocks from TWSE OpenAPI: {e}")
+
+    return stock_dict
+
+
 def calc_features(df, ticker, name):
     close = df['Close']
     open_ = df['Open']
