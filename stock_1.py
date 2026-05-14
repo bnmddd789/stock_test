@@ -46,6 +46,7 @@ RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "0.02"))
 DEFAULT_STOP_LOSS_PCT = float(os.environ.get("DEFAULT_STOP_LOSS_PCT", "8"))
 MAX_ENTRY_GAP_PCT = float(os.environ.get("MAX_ENTRY_GAP_PCT", "5"))
 AGGRESSIVE_TOP_N = int(os.environ.get("AGGRESSIVE_TOP_N", "5"))
+CONSERVATIVE_TOP_N = int(os.environ.get("CONSERVATIVE_TOP_N", "5"))
 TECHNICAL_SCORE_WEIGHT = float(os.environ.get("TECHNICAL_SCORE_WEIGHT", "0.8"))
 INSTITUTION_SCORE_WEIGHT = float(os.environ.get("INSTITUTION_SCORE_WEIGHT", "0.2"))
 SAVE_CSV_OUTPUT = False
@@ -54,6 +55,14 @@ SAVE_CSV_OUTPUT = False
 MIN_AVG_VALUE_20 = 50_000_000     # 20日均成交金額，預設 5000 萬
 MIN_TODAY_VALUE = 20_000_000      # 訊號日成交金額，預設 2000 萬
 MIN_AVG_VOLUME_20 = 300           # 20日均量，單位依 yfinance，通常為股數；此條件可視情況調整
+CONSERVATIVE_MIN_AVG_VALUE_20 = float(os.environ.get("CONSERVATIVE_MIN_AVG_VALUE_20", "80000000"))
+CONSERVATIVE_MIN_VOLUME_RATIO = float(os.environ.get("CONSERVATIVE_MIN_VOLUME_RATIO", "1.0"))
+CONSERVATIVE_MAX_VOLUME_RATIO = float(os.environ.get("CONSERVATIVE_MAX_VOLUME_RATIO", "2.5"))
+CONSERVATIVE_MAX_ROC_3 = float(os.environ.get("CONSERVATIVE_MAX_ROC_3", "12"))
+CONSERVATIVE_MAX_ROC_5 = float(os.environ.get("CONSERVATIVE_MAX_ROC_5", "18"))
+CONSERVATIVE_MAX_P_TO_MA20 = float(os.environ.get("CONSERVATIVE_MAX_P_TO_MA20", "12"))
+CONSERVATIVE_MAX_HIST_VOL = float(os.environ.get("CONSERVATIVE_MAX_HIST_VOL", "45"))
+CONSERVATIVE_MIN_INSTITUTION_SCORE = float(os.environ.get("CONSERVATIVE_MIN_INSTITUTION_SCORE", "50"))
 
 # 交易成本
 COMMISSION = 0.001425
@@ -951,6 +960,47 @@ def score_one_day(day_df):
         & (day_df["Aggressive_Rank"] <= AGGRESSIVE_TOP_N),
         "Aggressive_Tier",
     ] = f"Top{AGGRESSIVE_TOP_N}"
+    day_df["Liquidity_Score"] = day_df["Avg_Value_20"].rank(pct=True) * 100
+    day_df["Volatility_Defense_Score"] = (
+        1 - day_df["F_Hist_Vol"].rank(pct=True)
+    ) * 100
+    day_df["MA20_Distance_Defense_Score"] = (
+        1 - day_df["F_P_to_MA20"].rank(pct=True)
+    ) * 100
+    day_df["Conservative_Eligible"] = (
+        day_df["Stage2_Trend_OK"]
+        & (day_df["Close"] >= day_df["MA20"])
+        & (day_df["Avg_Value_20"] >= CONSERVATIVE_MIN_AVG_VALUE_20)
+        & (day_df["Volume_Ratio"] >= CONSERVATIVE_MIN_VOLUME_RATIO)
+        & (day_df["Volume_Ratio"] <= CONSERVATIVE_MAX_VOLUME_RATIO)
+        & day_df["ROC_3"].between(0, CONSERVATIVE_MAX_ROC_3)
+        & day_df["ROC_5"].between(0, CONSERVATIVE_MAX_ROC_5)
+        & (day_df["F_P_to_MA20"] <= CONSERVATIVE_MAX_P_TO_MA20)
+        & (day_df["F_Hist_Vol"] <= CONSERVATIVE_MAX_HIST_VOL)
+        & (day_df["Consecutive_Limit_Up_Like"] == 0)
+        & (day_df["Institution_Score"] >= CONSERVATIVE_MIN_INSTITUTION_SCORE)
+    )
+    day_df["Conservative_Score"] = (
+        day_df["Integrated_Score"] * 0.65
+        + day_df["Liquidity_Score"] * 0.15
+        + day_df["Volatility_Defense_Score"] * 0.10
+        + day_df["MA20_Distance_Defense_Score"] * 0.10
+    )
+    day_df["Conservative_Rank"] = np.nan
+
+    conservative_idx = day_df.index[day_df["Conservative_Eligible"]]
+    if len(conservative_idx) > 0:
+        day_df.loc[conservative_idx, "Conservative_Rank"] = day_df.loc[
+            conservative_idx, "Conservative_Score"
+        ].rank(ascending=False, method="min")
+
+    day_df["Conservative_Tier"] = ""
+    day_df.loc[day_df["Conservative_Rank"] <= 3, "Conservative_Tier"] = "Top3"
+    day_df.loc[
+        (day_df["Conservative_Rank"] > 3)
+        & (day_df["Conservative_Rank"] <= CONSERVATIVE_TOP_N),
+        "Conservative_Tier",
+    ] = f"Top{CONSERVATIVE_TOP_N}"
     day_df = add_trade_plan_columns(day_df)
 
     if not day_df.empty:
@@ -1041,6 +1091,42 @@ def run_aggressive_scan(df_all, top_n=AGGRESSIVE_TOP_N):
 
     return aggressive
 
+
+def run_conservative_scan(df_all, top_n=CONSERVATIVE_TOP_N):
+    print("🛡️ 執行保守策略掃描...")
+
+    latest_date = df_all['Date'].max()
+    market_risk = market_risk_status(df_all, latest_date)
+    latest_df = df_all[df_all['Date'].dt.date == latest_date.date()].copy()
+    scored = score_one_day(latest_df)
+
+    if scored.empty:
+        print("❌ 最新交易日沒有可供保守策略篩選的股票。")
+        return pd.DataFrame()
+
+    conservative = scored[scored["Conservative_Eligible"]].copy()
+    if conservative.empty:
+        print("ℹ️ 最新交易日沒有股票通過保守策略條件。")
+        return pd.DataFrame()
+
+    conservative = conservative.sort_values(
+        by=["Conservative_Score", "Integrated_Score", "AI_Score"],
+        ascending=False
+    ).head(top_n).copy()
+
+    for key, value in market_risk.items():
+        conservative[key] = value
+
+    print(f"🛡️ 保守策略 Top {top_n}")
+    for _, row in conservative.iterrows():
+        print(
+            f"{int(row['Conservative_Rank']):<2} {row['ID']} {row['Name']} "
+            f"保守分數={row['Conservative_Score']:.2f} "
+            f"整合分數={row['Integrated_Score']:.2f}"
+        )
+
+    return conservative
+
 def normalize_ticker_input(code):
     """
     支援輸入：
@@ -1130,6 +1216,9 @@ def analyze_single_stock(df_all, code):
         integrated_score = stock_score_row.get('Integrated_Score', ai_score)
         aggressive_rank = stock_score_row.get('Aggressive_Rank', np.nan)
         aggressive_tier = stock_score_row.get('Aggressive_Tier', '')
+        conservative_rank = stock_score_row.get('Conservative_Rank', np.nan)
+        conservative_tier = stock_score_row.get('Conservative_Tier', '')
+        conservative_score = stock_score_row.get('Conservative_Score', np.nan)
         stage2_trend_ok = stock_score_row.get('Stage2_Trend_OK', False)
     else:
         ai_score = np.nan
@@ -1141,6 +1230,9 @@ def analyze_single_stock(df_all, code):
         integrated_score = np.nan
         aggressive_rank = np.nan
         aggressive_tier = ""
+        conservative_rank = np.nan
+        conservative_tier = ""
+        conservative_score = np.nan
         stage2_trend_ok = False
 
     # ==============================
@@ -1296,6 +1388,9 @@ def analyze_single_stock(df_all, code):
         'Integrated_Score': integrated_score,
         'Aggressive_Rank': aggressive_rank,
         'Aggressive_Tier': aggressive_tier,
+        'Conservative_Rank': conservative_rank,
+        'Conservative_Tier': conservative_tier,
+        'Conservative_Score': conservative_score,
         'Stage2_Trend_OK': stage2_trend_ok,
         'Market_Rank': market_rank,
         'Market_Total': market_total,
@@ -1696,6 +1791,9 @@ def run_historical_signal_test(
             'Integrated_Score': row.get('Integrated_Score', row['AI_Score']),
             'Aggressive_Rank': row.get('Aggressive_Rank', np.nan),
             'Aggressive_Tier': row.get('Aggressive_Tier', ''),
+            'Conservative_Rank': row.get('Conservative_Rank', np.nan),
+            'Conservative_Tier': row.get('Conservative_Tier', ''),
+            'Conservative_Score': row.get('Conservative_Score', np.nan),
             'Stage2_Trend_OK': row.get('Stage2_Trend_OK', False),
             'Stop_Loss_Price': row.get('Stop_Loss_Price', np.nan),
             'Max_Buy_Price': row.get('Max_Buy_Price', np.nan),

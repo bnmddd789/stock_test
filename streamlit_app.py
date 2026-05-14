@@ -32,9 +32,13 @@ COLUMN_LABELS = {
     "AI_Score": "AI 分數",
     "Integrated_Score": "整合分數",
     "Institution_Score": "法人分數",
+    "Conservative_Score": "保守分數",
     "Attack_Rank": "攻擊排名",
     "Aggressive_Rank": "攻擊排名",
     "Aggressive_Tier": "攻擊層級",
+    "Conservative_Rank": "保守排名",
+    "Conservative_Tier": "保守層級",
+    "Conservative_Eligible": "保守候選",
     "Stage2_Trend_OK": "多頭排列",
     "Avg_Value_20": "20日均額",
     "Volume_Ratio": "量比",
@@ -96,8 +100,10 @@ DISPLAY_DIGITS = {
     "AI_Score": 2,
     "Integrated_Score": 2,
     "Institution_Score": 2,
+    "Conservative_Score": 2,
     "Attack_Rank": 0,
     "Aggressive_Rank": 0,
+    "Conservative_Rank": 0,
     "Close": 2,
     "Entry_Open": 2,
     "Entry_Gap_%": 2,
@@ -167,6 +173,7 @@ def init_state():
     st.session_state.setdefault("last_logs", "")
     st.session_state.setdefault("scan_result", pd.DataFrame())
     st.session_state.setdefault("attack_result", pd.DataFrame())
+    st.session_state.setdefault("conservative_result", pd.DataFrame())
     st.session_state.setdefault("history_result", pd.DataFrame())
     st.session_state.setdefault("history_comparison", pd.DataFrame())
     st.session_state.setdefault("single_result", pd.DataFrame())
@@ -706,6 +713,19 @@ def render_attack_table(df):
     render_table(df, cols, height=300)
 
 
+def render_conservative_table(df):
+    if df is None or df.empty:
+        st.info("目前沒有符合保守策略條件的股票。")
+        return
+
+    cols = [
+        "Conservative_Rank", "ID", "Name", "Industry", "Close", "Conservative_Score",
+        "Integrated_Score", "Institution_Score", "Conservative_Tier",
+        "Stop_Loss_Price", "Sell_Zone", "Volume_Ratio", "ROC_3", "ROC_5", "Hint",
+    ]
+    render_table(df, cols, height=300)
+
+
 def build_history_comparison(df_all, result_df, target_date):
     if result_df is None or result_df.empty:
         return pd.DataFrame()
@@ -901,6 +921,7 @@ def sidebar():
         st.session_state.fundamental_cache = {}
         st.session_state.scan_result = pd.DataFrame()
         st.session_state.attack_result = pd.DataFrame()
+        st.session_state.conservative_result = pd.DataFrame()
         st.session_state.history_result = pd.DataFrame()
         st.session_state.history_comparison = pd.DataFrame()
         st.session_state.single_result = pd.DataFrame()
@@ -921,18 +942,26 @@ def latest_tab():
 
         result_df, run_logs = capture_output(stock_1.run_today_scan, df_all)
         attack_df, attack_logs = capture_output(stock_1.run_aggressive_scan, df_all)
+        conservative_df, conservative_logs = capture_output(stock_1.run_conservative_scan, df_all)
         st.session_state.scan_result = result_df
         st.session_state.attack_result = attack_df
-        st.session_state.last_logs = f"{data_logs}\n{run_logs}\n{attack_logs}".strip()
+        st.session_state.conservative_result = conservative_df
+        st.session_state.last_logs = (
+            f"{data_logs}\n{run_logs}\n{attack_logs}\n{conservative_logs}"
+        ).strip()
 
     if not st.session_state.attack_result.empty:
-        st.markdown("**強勢攻擊 Top5 / Top3**")
+        st.markdown(f"**強勢攻擊 Top{stock_1.AGGRESSIVE_TOP_N} / Top3**")
         render_attack_table(st.session_state.attack_result)
+
+    if not st.session_state.conservative_result.empty:
+        st.markdown(f"**保守策略 Top{stock_1.CONSERVATIVE_TOP_N} / Top3**")
+        render_conservative_table(st.session_state.conservative_result)
 
     st.markdown("**Top20 觀察名單**")
     cols = [
         "Rank", "ID", "Name", "Industry", "Close", "AI_Score", "Integrated_Score",
-        "Aggressive_Tier", "Avg_Value_20", "Volume_Ratio", "ROC_3",
+        "Aggressive_Tier", "Conservative_Tier", "Avg_Value_20", "Volume_Ratio", "ROC_3",
         "ROC_5", "F_ROC_10", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Hint",
     ]
     render_table(st.session_state.scan_result, cols, height=520)
@@ -996,7 +1025,7 @@ def history_tab():
     st.markdown("**推薦名單**")
     cols = [
         "Rank", "ID", "Name", "Industry", "AI_Score", "Integrated_Score",
-        "Aggressive_Tier", "Entry_Date", "Entry_Open", "Entry_Gap_%",
+        "Aggressive_Tier", "Conservative_Tier", "Entry_Date", "Entry_Open", "Entry_Gap_%",
         "Entry_Filter", "Backtest_Stop_Price", "Stop_Loss_Pct", "Sell_Zone",
         "Stop_Exit_Date", "Stop_Exit_Price", "Stop_Exit_Reason", "Stop_Net_Return_%",
         "Hold_Today_Date", "Hold_Today_Close", "Hold_Today_Net_Return_%",
@@ -1068,6 +1097,11 @@ def single_tab():
     if isinstance(hint, str) and hint.strip():
         st.warning(hint)
 
+    if isinstance(row.get("Conservative_Tier", ""), str) and row.get("Conservative_Tier", "").strip():
+        st.success(
+            f"保守策略入選：{row.get('Conservative_Tier')}｜保守分數 {fmt_number(row.get('Conservative_Score'))}"
+        )
+
     plan_cols = st.columns(4)
     plan_cols[0].metric("停損價", fmt_number(row.get("Stop_Loss_Price")))
     plan_cols[1].metric("最高追價", fmt_number(row.get("Max_Buy_Price")))
@@ -1082,8 +1116,8 @@ def single_tab():
     cols = [
         "Date", "ID", "Name", "Industry", "Close", "MA5", "MA20", "MA60",
         "Trend_Points", "Trend_View", "Score_Status", "Score_Reason",
-        "AI_Score", "Integrated_Score", "Institution_Score",
-        "Aggressive_Rank", "Aggressive_Tier", "Market_PR_%",
+        "AI_Score", "Integrated_Score", "Institution_Score", "Conservative_Score",
+        "Aggressive_Rank", "Aggressive_Tier", "Conservative_Rank", "Conservative_Tier", "Market_PR_%",
         "ROC_1", "ROC_3", "ROC_5", "ROC_10", "ROC_20", "ROC_30",
         "Volume_Ratio", "Avg_Value_20", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price",
         "Suggested_Capital", "Recent_20_High", "Recent_20_Low", "Reasons",
