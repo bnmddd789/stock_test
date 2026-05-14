@@ -67,6 +67,18 @@ COLUMN_LABELS = {
     "Market_Message": "大盤風控",
     "Market_Allowed": "允許新倉",
     "Stop_Loss_Price": "停損價",
+    "Backtest_Stop_Price": "回測停損價",
+    "Stop_Loss_Pct": "停損%",
+    "Stop_Exit_Date": "停損/持有出場日",
+    "Stop_Exit_Price": "停損/持有出場價",
+    "Stop_Exit_Reason": "停損狀態",
+    "Stop_Net_Return_%": "停損後報酬%",
+    "Hold_Today_Date": "持有至今日",
+    "Hold_Today_Close": "今日收盤",
+    "Hold_Today_Net_Return_%": "持有至今報酬%",
+    "Take_Profit_Low": "停利區間低",
+    "Take_Profit_High": "停利區間高",
+    "Sell_Zone": "停利觀察區",
     "Max_Buy_Price": "最高追價",
     "Suggested_Capital": "建議金額",
     "Suggested_Shares": "建議股數",
@@ -107,6 +119,14 @@ DISPLAY_DIGITS = {
     "Trend_Points": 0,
     "Market_PR_%": 2,
     "Stop_Loss_Price": 2,
+    "Backtest_Stop_Price": 2,
+    "Stop_Loss_Pct": 1,
+    "Stop_Exit_Price": 2,
+    "Stop_Net_Return_%": 2,
+    "Hold_Today_Close": 2,
+    "Hold_Today_Net_Return_%": 2,
+    "Take_Profit_Low": 2,
+    "Take_Profit_High": 2,
     "Max_Buy_Price": 2,
     "Suggested_Capital": 0,
     "Suggested_Shares": 0,
@@ -493,11 +513,10 @@ def fetch_fundamentals(ticker, stock_dict):
         cached["industry"] = stock_1.normalize_industry_name(
             cached.get("industry") or local_industry
         ) or local_industry
-        if not cached.get("business") or str(cached.get("business")).startswith("目前可取得"):
-            cached["business"] = build_local_business_intro(
-                cached.get("name") or local_name,
-                cached.get("industry") or local_industry,
-            )
+        cached["business"] = build_local_business_intro(
+            cached.get("name") or local_name,
+            cached.get("industry") or local_industry,
+        )
         return cached
 
     result = {
@@ -528,13 +547,15 @@ def fetch_fundamentals(ticker, stock_dict):
             dividend_yield = dividend_yield * 100
 
         yf_industry = info.get("industry") or ""
-        yf_summary = compact_text(info.get("longBusinessSummary"))
         result.update({
             "name": info.get("longName") or info.get("shortName") or result["name"],
-            "industry": result["industry"] if result["industry"] != "產業分類暫無資料" else yf_industry,
+            "industry": result["industry"],
             "sector": info.get("sector") or "",
             "yfinance_industry": yf_industry,
-            "business": yf_summary or result["business"],
+            "business": build_local_business_intro(
+                info.get("longName") or info.get("shortName") or result["name"],
+                result["industry"],
+            ),
             "website": info.get("website") or "",
             "metrics": {
                 "市值": info.get("marketCap"),
@@ -631,10 +652,6 @@ def render_fundamentals_panel(rows_df, df_all=None, stock_dict=None, key_prefix=
 
     industry = stock_1.normalize_industry_name(fundamentals.get("industry")) or local_industry
     st.write(f"**產業類別**：{industry}")
-    if fundamentals.get("sector"):
-        st.write(f"**Yahoo Sector**：{fundamentals['sector']}")
-    if fundamentals.get("yfinance_industry") and fundamentals["yfinance_industry"] != industry:
-        st.caption(f"Yahoo Industry：{fundamentals['yfinance_industry']}")
     st.write(f"**基本面觀察**：{fundamentals.get('business') or build_local_business_intro(local_info.get('name'), industry)}")
 
     link_cols = st.columns(3)
@@ -683,7 +700,7 @@ def render_attack_table(df):
     cols = [
         "Attack_Rank", "ID", "Name", "Industry", "Close", "Integrated_Score",
         "AI_Score", "Institution_Score", "Aggressive_Tier",
-        "Stop_Loss_Price", "Max_Buy_Price", "Suggested_Capital",
+        "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Suggested_Capital",
         "Volume_Ratio", "F_ROC_10", "Hint",
     ]
     render_table(df, cols, height=300)
@@ -703,7 +720,90 @@ def build_history_comparison(df_all, result_df, target_date):
         return pd.DataFrame()
 
     rows = []
-    benchmark_cache = {}
+    day_benchmark_cache = {}
+    hold_benchmark_cache = {}
+
+    def total_invest_for(valid_df):
+        if "Invest_Amount" in valid_df.columns:
+            return float(pd.to_numeric(valid_df["Invest_Amount"], errors="coerce").sum())
+        return float(stock_1.CAPITAL_PER_STOCK * len(valid_df))
+
+    def get_day_benchmark(total_invest, benchmark_ticker, benchmark_name):
+        cache_key = (total_invest, benchmark_ticker)
+        if cache_key not in day_benchmark_cache:
+            benchmark_df, _ = capture_output(
+                stock_1.calc_benchmark_result,
+                df_all,
+                signal_date,
+                total_invest,
+                forward_days_list=FORWARD_DAYS,
+                benchmark_ticker=benchmark_ticker,
+                benchmark_name=benchmark_name,
+                expected_entry_date=market_entry_date,
+            )
+            day_benchmark_cache[cache_key] = benchmark_df
+        return day_benchmark_cache[cache_key]
+
+    def get_hold_benchmark(total_invest, benchmark_ticker, benchmark_name):
+        cache_key = (total_invest, benchmark_ticker)
+        if cache_key not in hold_benchmark_cache:
+            benchmark_df, _ = capture_output(
+                stock_1.calc_benchmark_to_latest,
+                df_all,
+                signal_date,
+                total_invest,
+                benchmark_ticker=benchmark_ticker,
+                benchmark_name=benchmark_name,
+                expected_entry_date=market_entry_date,
+            )
+            hold_benchmark_cache[cache_key] = benchmark_df
+        return hold_benchmark_cache[cache_key]
+
+    def read_day_benchmark(benchmark_df, days):
+        if benchmark_df is None or benchmark_df.empty:
+            return None, None
+        value_col = f"Day{days}_Net_Value"
+        return_col = f"Day{days}_Net_Return_%"
+        if value_col not in benchmark_df.columns:
+            return None, None
+        return benchmark_df.iloc[0][value_col], benchmark_df.iloc[0][return_col]
+
+    def read_hold_benchmark(benchmark_df):
+        if benchmark_df is None or benchmark_df.empty:
+            return None, None
+        return benchmark_df.iloc[0]["Net_Value"], benchmark_df.iloc[0]["Net_Return_%"]
+
+    def append_compare_row(mode, valid_count, total_invest, strategy_value, strategy_return, bench2, bench0050, note=""):
+        bench2_value, bench2_return = bench2
+        bench0050_value, bench0050_return = bench0050
+        diff2 = None
+        diff0050 = None
+        if bench2_return is not None and not pd.isna(bench2_return):
+            diff2 = strategy_return - float(bench2_return)
+        if bench0050_return is not None and not pd.isna(bench0050_return):
+            diff0050 = strategy_return - float(bench0050_return)
+
+        winners = []
+        if diff2 is not None:
+            winners.append("勝正2" if diff2 > 0 else "輸正2")
+        if diff0050 is not None:
+            winners.append("勝0050" if diff0050 > 0 else "輸0050")
+
+        rows.append({
+            "比較方式": mode,
+            "有效檔數": valid_count,
+            "投入金額": fmt_money(total_invest),
+            "策略淨值": fmt_money(strategy_value),
+            "策略報酬%": fmt_pct(strategy_return),
+            f"{stock_1.BENCHMARK_NAME} 淨值": fmt_money(bench2_value),
+            f"{stock_1.BENCHMARK_NAME} 報酬%": fmt_pct(bench2_return),
+            f"{stock_1.BENCHMARK_0050_NAME} 淨值": fmt_money(bench0050_value),
+            f"{stock_1.BENCHMARK_0050_NAME} 報酬%": fmt_pct(bench0050_return),
+            "對正2差距%": fmt_pct(diff2),
+            "對0050差距%": fmt_pct(diff0050),
+            "勝負": " / ".join(winners) if winners else "N/A",
+            "備註": note,
+        })
 
     for days in FORWARD_DAYS:
         value_col = f"Day{days}_Net_Value"
@@ -717,56 +817,67 @@ def build_history_comparison(df_all, result_df, target_date):
             continue
 
         valid_count = int(len(valid_df))
-        total_invest = stock_1.CAPITAL_PER_STOCK * valid_count
+        total_invest = total_invest_for(valid_df)
         strategy_value = float(valid_df[value_col].sum())
         strategy_profit = float(valid_df[profit_col].sum())
         strategy_return = strategy_profit / total_invest * 100
 
-        if total_invest not in benchmark_cache:
-            benchmark_df, _ = capture_output(
-                stock_1.calc_benchmark_result,
-                df_all,
-                signal_date,
-                total_invest,
-                forward_days_list=FORWARD_DAYS,
-                benchmark_ticker=stock_1.BENCHMARK_TICKER,
-                benchmark_name=stock_1.BENCHMARK_NAME,
-                expected_entry_date=market_entry_date,
-            )
-            benchmark_cache[total_invest] = benchmark_df
+        bench2 = read_day_benchmark(
+            get_day_benchmark(total_invest, stock_1.BENCHMARK_TICKER, stock_1.BENCHMARK_NAME),
+            days,
+        )
+        bench0050 = read_day_benchmark(
+            get_day_benchmark(total_invest, stock_1.BENCHMARK_0050_TICKER, stock_1.BENCHMARK_0050_NAME),
+            days,
+        )
+        append_compare_row(
+            f"持有 {days} 日",
+            valid_count,
+            total_invest,
+            strategy_value,
+            strategy_return,
+            bench2,
+            bench0050,
+        )
 
-        benchmark_return = None
-        benchmark_value = None
-        benchmark_df = benchmark_cache[total_invest]
+    summary_modes = [
+        ("自訂停損/持有至今", "Stop_Net_Value", "Stop_Net_Profit"),
+        ("買入後持有至今", "Hold_Today_Net_Value", "Hold_Today_Net_Profit"),
+    ]
+    for mode, value_col, profit_col in summary_modes:
+        if value_col not in result_df.columns or profit_col not in result_df.columns:
+            continue
 
-        if benchmark_df is not None and not benchmark_df.empty:
-            bench_value_col = f"Day{days}_Net_Value"
-            bench_return_col = f"Day{days}_Net_Return_%"
-            if bench_value_col in benchmark_df.columns:
-                benchmark_value = benchmark_df.iloc[0][bench_value_col]
-                benchmark_return = benchmark_df.iloc[0][bench_return_col]
+        valid_df = result_df[result_df[value_col].notna()].copy()
+        if valid_df.empty:
+            continue
 
-        diff_return = None
-        diff_value = None
-        winner = "N/A"
+        valid_count = int(len(valid_df))
+        total_invest = total_invest_for(valid_df)
+        strategy_value = float(valid_df[value_col].sum())
+        strategy_profit = float(valid_df[profit_col].sum())
+        strategy_return = strategy_profit / total_invest * 100
+        bench2 = read_hold_benchmark(
+            get_hold_benchmark(total_invest, stock_1.BENCHMARK_TICKER, stock_1.BENCHMARK_NAME)
+        )
+        bench0050 = read_hold_benchmark(
+            get_hold_benchmark(total_invest, stock_1.BENCHMARK_0050_TICKER, stock_1.BENCHMARK_0050_NAME)
+        )
+        note = ""
+        if "Stop_Exit_Reason" in valid_df.columns and mode.startswith("自訂停損"):
+            stop_count = valid_df["Stop_Exit_Reason"].astype(str).str.contains("觸發停損").sum()
+            note = f"觸發停損 {int(stop_count)} 檔"
 
-        if benchmark_return is not None and not pd.isna(benchmark_return):
-            diff_return = strategy_return - float(benchmark_return)
-            diff_value = strategy_value - float(benchmark_value)
-            winner = "Top20" if diff_return > 0 else stock_1.BENCHMARK_NAME
-
-        rows.append({
-            "持有日": days,
-            "有效檔數": valid_count,
-            "投入金額": fmt_money(total_invest),
-            "Top20 淨值": fmt_money(strategy_value),
-            "Top20 報酬%": fmt_pct(strategy_return),
-            f"{stock_1.BENCHMARK_NAME} 淨值": fmt_money(benchmark_value),
-            f"{stock_1.BENCHMARK_NAME} 報酬%": fmt_pct(benchmark_return),
-            "差距%": fmt_pct(diff_return),
-            "差距金額": fmt_money(diff_value),
-            "勝出": winner,
-        })
+        append_compare_row(
+            mode,
+            valid_count,
+            total_invest,
+            strategy_value,
+            strategy_return,
+            bench2,
+            bench0050,
+            note=note,
+        )
 
     return pd.DataFrame(rows)
 
@@ -822,7 +933,7 @@ def latest_tab():
     cols = [
         "Rank", "ID", "Name", "Industry", "Close", "AI_Score", "Integrated_Score",
         "Aggressive_Tier", "Avg_Value_20", "Volume_Ratio", "ROC_3",
-        "ROC_5", "F_ROC_10", "Stop_Loss_Price", "Max_Buy_Price", "Hint",
+        "ROC_5", "F_ROC_10", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Hint",
     ]
     render_table(st.session_state.scan_result, cols, height=520)
     render_fundamentals_panel(
@@ -839,6 +950,14 @@ def history_tab():
 
     default_date = datetime.now().strftime("%Y/%m/%d")
     target_date = st.text_input("日期", value=default_date, placeholder="2026/04/13")
+    stop_loss_pct = st.slider(
+        "自訂停損%",
+        min_value=3.0,
+        max_value=20.0,
+        value=float(stock_1.DEFAULT_STOP_LOSS_PCT),
+        step=0.5,
+        help="回測會用自訂停損%與技術停損價中較接近買進價的一個作為出場線。",
+    )
 
     if st.button("驗證歷史 Top20", type="primary", use_container_width=True):
         df_all, _, data_logs = get_data()
@@ -853,6 +972,7 @@ def history_tab():
             top_n=stock_1.TOP_N,
             forward_days_list=FORWARD_DAYS,
             capital_per_stock=stock_1.CAPITAL_PER_STOCK,
+            stop_loss_pct=stop_loss_pct,
         )
         comparison_df = build_history_comparison(df_all, result_df, target_date)
 
@@ -877,7 +997,9 @@ def history_tab():
     cols = [
         "Rank", "ID", "Name", "Industry", "AI_Score", "Integrated_Score",
         "Aggressive_Tier", "Entry_Date", "Entry_Open", "Entry_Gap_%",
-        "Entry_Filter", "Stop_Loss_Price",
+        "Entry_Filter", "Backtest_Stop_Price", "Stop_Loss_Pct", "Sell_Zone",
+        "Stop_Exit_Date", "Stop_Exit_Price", "Stop_Exit_Reason", "Stop_Net_Return_%",
+        "Hold_Today_Date", "Hold_Today_Close", "Hold_Today_Net_Return_%",
         "Day1_Net_Return_%", "Day7_Net_Return_%", "Day30_Net_Return_%",
         "Avg_Value_20", "Volume_Ratio", "Hint",
     ]
@@ -953,6 +1075,7 @@ def single_tab():
     plan_cols[2].metric("建議金額", "-" if capital is None or pd.isna(capital) else f"{float(capital):,.0f}")
     shares = row.get("Suggested_Shares")
     plan_cols[3].metric("建議股數", "-" if shares is None or pd.isna(shares) else f"{float(shares):,.0f}")
+    st.metric("停利觀察區", row.get("Sell_Zone", "-"))
     if isinstance(row.get("Exit_Rule", ""), str) and row.get("Exit_Rule", "").strip():
         st.caption(row.get("Exit_Rule"))
 
@@ -962,7 +1085,7 @@ def single_tab():
         "AI_Score", "Integrated_Score", "Institution_Score",
         "Aggressive_Rank", "Aggressive_Tier", "Market_PR_%",
         "ROC_1", "ROC_3", "ROC_5", "ROC_10", "ROC_20", "ROC_30",
-        "Volume_Ratio", "Avg_Value_20", "Stop_Loss_Price", "Max_Buy_Price",
+        "Volume_Ratio", "Avg_Value_20", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price",
         "Suggested_Capital", "Recent_20_High", "Recent_20_Low", "Reasons",
     ]
     render_table(result_df, cols, height=260)

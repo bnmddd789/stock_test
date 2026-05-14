@@ -37,10 +37,13 @@ YF_THREADS = os.environ.get("YF_THREADS", "0").lower() in ("1", "true", "yes")
 CAPITAL_PER_STOCK = 100_000
 BENCHMARK_TICKER = "00631L.TW"   # 0050 正2
 BENCHMARK_NAME = "0050正2"
+BENCHMARK_0050_TICKER = "0050.TW"
+BENCHMARK_0050_NAME = "0050"
 MARKET_RISK_TICKER = os.environ.get("MARKET_RISK_TICKER", "0050.TW")
 MARKET_RISK_NAME = os.environ.get("MARKET_RISK_NAME", "0050")
 PORTFOLIO_CAPITAL = float(os.environ.get("PORTFOLIO_CAPITAL", "500000"))
 RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "0.02"))
+DEFAULT_STOP_LOSS_PCT = float(os.environ.get("DEFAULT_STOP_LOSS_PCT", "8"))
 MAX_ENTRY_GAP_PCT = float(os.environ.get("MAX_ENTRY_GAP_PCT", "5"))
 AGGRESSIVE_TOP_N = int(os.environ.get("AGGRESSIVE_TOP_N", "5"))
 TECHNICAL_SCORE_WEIGHT = float(os.environ.get("TECHNICAL_SCORE_WEIGHT", "0.8"))
@@ -195,6 +198,10 @@ def add_required_benchmark(stock_dict):
     stock_dict.setdefault(
         MARKET_RISK_TICKER,
         {"name": MARKET_RISK_NAME, "ind": "Market Risk Proxy"},
+    )
+    stock_dict.setdefault(
+        BENCHMARK_0050_TICKER,
+        {"name": BENCHMARK_0050_NAME, "ind": "Benchmark"},
     )
     return stock_dict
 
@@ -850,6 +857,8 @@ def add_trade_plan_columns(df):
     stop_loss = pd.concat([ma20, close * 0.92], axis=1).max(axis=1)
     stop_loss = stop_loss.where(stop_loss < close, close * 0.92)
     risk_per_share = (close - stop_loss).clip(lower=0.01)
+    take_profit_low = close + risk_per_share * 2
+    take_profit_high = close + risk_per_share * 3
     risk_budget = PORTFOLIO_CAPITAL * RISK_PER_TRADE_PCT
     raw_shares = np.floor(risk_budget / risk_per_share)
     round_lot_shares = np.floor(raw_shares / 1000) * 1000
@@ -858,10 +867,18 @@ def add_trade_plan_columns(df):
 
     df["Stop_Loss_Price"] = stop_loss
     df["Risk_Per_Share"] = risk_per_share
+    df["Take_Profit_Low"] = take_profit_low
+    df["Take_Profit_High"] = take_profit_high
     df["Suggested_Shares"] = suggested_shares
     df["Suggested_Capital"] = suggested_capital
     df["Max_Buy_Price"] = close * (1 + MAX_ENTRY_GAP_PCT / 100)
-    df["Exit_Rule"] = "跌破MA5減碼；跌破MA20或虧損達停損價出場；開高超過上限不追"
+    df["Sell_Zone"] = [
+        f"{low:.2f} ~ {high:.2f}"
+        if not pd.isna(low) and not pd.isna(high)
+        else ""
+        for low, high in zip(take_profit_low, take_profit_high)
+    ]
+    df["Exit_Rule"] = "跌破MA5減碼；跌破MA20或停損價出場；漲到停利區間可分批賣出；開高超過上限不追"
     return df
 
 
@@ -873,7 +890,7 @@ def score_one_day(day_df):
 
     if "Ticker" in day_df.columns:
         day_df = day_df[
-            ~day_df["Ticker"].isin([BENCHMARK_TICKER, MARKET_RISK_TICKER])
+            ~day_df["Ticker"].isin([BENCHMARK_TICKER, MARKET_RISK_TICKER, BENCHMARK_0050_TICKER])
         ].copy()
 
     day_df = day_df.dropna(subset=FEATURES + [
@@ -1080,9 +1097,9 @@ def analyze_single_stock(df_all, code):
         if col not in latest.index or pd.isna(latest[col])
     ]
 
-    if latest['Ticker'] == BENCHMARK_TICKER:
+    if latest['Ticker'] in [BENCHMARK_TICKER, BENCHMARK_0050_TICKER]:
         score_status = "不列入排名"
-        score_reason = f"{BENCHMARK_NAME} 是績效比較基準，不列入選股排名。"
+        score_reason = "這檔是績效比較基準，不列入選股排名。"
     elif missing_features:
         score_status = "資料不足"
         score_reason = "缺少排名所需欄位：" + "、".join(missing_features)
@@ -1287,6 +1304,9 @@ def analyze_single_stock(df_all, code):
         'Market_Status': market_risk.get('Market_Status'),
         'Market_Message': market_risk.get('Market_Message'),
         'Stop_Loss_Price': latest_plan.get('Stop_Loss_Price'),
+        'Take_Profit_Low': latest_plan.get('Take_Profit_Low'),
+        'Take_Profit_High': latest_plan.get('Take_Profit_High'),
+        'Sell_Zone': latest_plan.get('Sell_Zone'),
         'Max_Buy_Price': latest_plan.get('Max_Buy_Price'),
         'Suggested_Capital': latest_plan.get('Suggested_Capital'),
         'Suggested_Shares': latest_plan.get('Suggested_Shares'),
@@ -1434,6 +1454,137 @@ def calc_benchmark_result(
             result[f'Day{n}_Net_Return_%'] = np.nan
 
     return pd.DataFrame([result])
+
+
+def calc_net_trade_result(capital, entry_price, exit_price):
+    if pd.isna(entry_price) or pd.isna(exit_price) or entry_price <= 0:
+        return np.nan, np.nan, np.nan
+
+    ret = exit_price / entry_price - 1
+    gross_value = capital * (1 + ret)
+    buy_fee = capital * COMMISSION
+    sell_fee = gross_value * COMMISSION
+    sell_tax = gross_value * SELL_TAX
+    net_value = gross_value - buy_fee - sell_fee - sell_tax
+    net_profit = net_value - capital
+    net_return = net_profit / capital * 100
+    return net_value, net_profit, net_return
+
+
+def calc_stop_loss_backtest(
+    stock_hist,
+    entry_idx,
+    entry_open,
+    capital,
+    stop_loss_pct=DEFAULT_STOP_LOSS_PCT,
+    technical_stop_price=np.nan,
+):
+    percent_stop = entry_open * (1 - stop_loss_pct / 100)
+    stop_candidates = [percent_stop]
+    if not pd.isna(technical_stop_price) and technical_stop_price < entry_open:
+        stop_candidates.append(float(technical_stop_price))
+
+    stop_price = max(stop_candidates)
+    latest = stock_hist.iloc[-1]
+    exit_idx = None
+    exit_price = np.nan
+    exit_reason = "持有至今"
+
+    for idx in range(entry_idx, len(stock_hist)):
+        low = stock_hist.loc[idx, "Low"]
+        if not pd.isna(low) and low <= stop_price:
+            exit_idx = idx
+            exit_price = stop_price
+            exit_reason = f"觸發停損 {stop_loss_pct:.1f}%"
+            break
+
+    if exit_idx is None:
+        exit_idx = len(stock_hist) - 1
+        exit_price = latest["Close"]
+
+    net_value, net_profit, net_return = calc_net_trade_result(
+        capital,
+        entry_open,
+        exit_price,
+    )
+
+    return {
+        "Stop_Loss_Pct": stop_loss_pct,
+        "Backtest_Stop_Price": stop_price,
+        "Stop_Exit_Date": stock_hist.loc[exit_idx, "Date"].date(),
+        "Stop_Exit_Price": exit_price,
+        "Stop_Exit_Reason": exit_reason,
+        "Stop_Net_Value": net_value,
+        "Stop_Net_Profit": net_profit,
+        "Stop_Net_Return_%": net_return,
+    }
+
+
+def calc_hold_to_latest_result(stock_hist, entry_idx, entry_open, capital):
+    latest = stock_hist.iloc[-1]
+    latest_close = latest["Close"]
+    net_value, net_profit, net_return = calc_net_trade_result(
+        capital,
+        entry_open,
+        latest_close,
+    )
+
+    return {
+        "Hold_Today_Date": latest["Date"].date(),
+        "Hold_Today_Close": latest_close,
+        "Hold_Today_Net_Value": net_value,
+        "Hold_Today_Net_Profit": net_profit,
+        "Hold_Today_Net_Return_%": net_return,
+    }
+
+
+def calc_benchmark_to_latest(
+    df_all,
+    signal_date,
+    total_capital,
+    benchmark_ticker=BENCHMARK_TICKER,
+    benchmark_name=BENCHMARK_NAME,
+    expected_entry_date=None,
+):
+    bench_df = df_all[df_all["Ticker"] == benchmark_ticker].copy()
+    if bench_df.empty:
+        return pd.DataFrame()
+
+    bench_df = bench_df.sort_values("Date").reset_index(drop=True)
+    idx_list = bench_df.index[bench_df["Date"].dt.date == signal_date.date()].tolist()
+    if len(idx_list) == 0:
+        return pd.DataFrame()
+
+    entry_idx = idx_list[0] + 1
+    if entry_idx >= len(bench_df):
+        return pd.DataFrame()
+
+    entry_date = bench_df.loc[entry_idx, "Date"]
+    if expected_entry_date is not None and entry_date.date() != expected_entry_date.date():
+        return pd.DataFrame()
+
+    entry_open = bench_df.loc[entry_idx, "Open"]
+    latest = bench_df.iloc[-1]
+    latest_close = latest["Close"]
+    net_value, net_profit, net_return = calc_net_trade_result(
+        total_capital,
+        entry_open,
+        latest_close,
+    )
+
+    return pd.DataFrame([{
+        "Benchmark": benchmark_name,
+        "Ticker": benchmark_ticker,
+        "Signal_Date": signal_date.date(),
+        "Entry_Date": entry_date.date(),
+        "Entry_Open": entry_open,
+        "Exit_Date": latest["Date"].date(),
+        "Exit_Close": latest_close,
+        "Invest_Amount": total_capital,
+        "Net_Value": net_value,
+        "Net_Profit": net_profit,
+        "Net_Return_%": net_return,
+    }])
 # ==========================================
 # 指定歷史日期推薦 + 驗證到 30 日
 # ==========================================
@@ -1442,7 +1593,8 @@ def run_historical_signal_test(
     target_date_str,
     top_n=20,
     forward_days_list=[1, 3, 5, 7, 10, 14, 21, 30],
-    capital_per_stock=100_000
+    capital_per_stock=100_000,
+    stop_loss_pct=DEFAULT_STOP_LOSS_PCT
 ):
     try:
         target_date = normalize_input_date(target_date_str)
@@ -1556,6 +1708,41 @@ def run_historical_signal_test(
             'Hint': row['Hint'],
         }
 
+        stop_stats = calc_stop_loss_backtest(
+            stock_hist,
+            entry_idx,
+            entry_open,
+            capital_per_stock,
+            stop_loss_pct=stop_loss_pct,
+            technical_stop_price=row.get('Stop_Loss_Price', np.nan),
+        )
+        hold_stats = calc_hold_to_latest_result(
+            stock_hist,
+            entry_idx,
+            entry_open,
+            capital_per_stock,
+        )
+        backtest_stop_price = stop_stats.get("Backtest_Stop_Price", np.nan)
+        risk_per_share = (
+            entry_open - backtest_stop_price
+            if not pd.isna(backtest_stop_price)
+            else np.nan
+        )
+        if not pd.isna(risk_per_share) and risk_per_share > 0:
+            result["Take_Profit_Low"] = entry_open + risk_per_share * 2
+            result["Take_Profit_High"] = entry_open + risk_per_share * 3
+            result["Sell_Zone"] = (
+                f"{result['Take_Profit_Low']:.2f} ~ "
+                f"{result['Take_Profit_High']:.2f}"
+            )
+        else:
+            result["Take_Profit_Low"] = np.nan
+            result["Take_Profit_High"] = np.nan
+            result["Sell_Zone"] = ""
+
+        result.update(stop_stats)
+        result.update(hold_stats)
+
         for n in forward_days_list:
             exit_idx = entry_idx + n
 
@@ -1628,6 +1815,10 @@ def run_historical_signal_test(
         'Name',
         'AI_Score',
         'Entry_Open',
+        'Backtest_Stop_Price',
+        'Sell_Zone',
+        'Stop_Net_Return_%',
+        'Hold_Today_Net_Return_%',
         'Invest_Amount',
         'Max_Available_Days',
     ]
@@ -1644,6 +1835,9 @@ def run_historical_signal_test(
     formatters = {
         'AI_Score': '{:.2f}'.format,
         'Entry_Open': '{:.2f}'.format,
+        'Backtest_Stop_Price': '{:.2f}'.format,
+        'Stop_Net_Return_%': '{:.2f}'.format,
+        'Hold_Today_Net_Return_%': '{:.2f}'.format,
         'Invest_Amount': '{:,.0f}'.format,
         'Max_Available_Days': '{:.0f}'.format,
     }
