@@ -71,6 +71,10 @@ COLUMN_LABELS = {
     "Market_Message": "大盤風控",
     "Market_Allowed": "允許新倉",
     "Stop_Loss_Price": "停損價",
+    "Best_Buy_Low": "買點區低",
+    "Best_Buy_High": "買點區高",
+    "Best_Buy_Zone": "最佳買入區間",
+    "Buy_Zone_Status": "買點狀態",
     "Backtest_Stop_Price": "回測停損價",
     "Stop_Loss_Pct": "停損%",
     "Stop_Exit_Date": "停損/持有出場日",
@@ -125,6 +129,8 @@ DISPLAY_DIGITS = {
     "Trend_Points": 0,
     "Market_PR_%": 2,
     "Stop_Loss_Price": 2,
+    "Best_Buy_Low": 2,
+    "Best_Buy_High": 2,
     "Backtest_Stop_Price": 2,
     "Stop_Loss_Pct": 1,
     "Stop_Exit_Price": 2,
@@ -176,6 +182,8 @@ def init_state():
     st.session_state.setdefault("conservative_result", pd.DataFrame())
     st.session_state.setdefault("history_result", pd.DataFrame())
     st.session_state.setdefault("history_comparison", pd.DataFrame())
+    st.session_state.setdefault("history_conservative_result", pd.DataFrame())
+    st.session_state.setdefault("history_conservative_comparison", pd.DataFrame())
     st.session_state.setdefault("single_result", pd.DataFrame())
     st.session_state.setdefault("fundamental_cache", {})
 
@@ -707,7 +715,7 @@ def render_attack_table(df):
     cols = [
         "Attack_Rank", "ID", "Name", "Industry", "Close", "Integrated_Score",
         "AI_Score", "Institution_Score", "Aggressive_Tier",
-        "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Suggested_Capital",
+        "Best_Buy_Zone", "Buy_Zone_Status", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Suggested_Capital",
         "Volume_Ratio", "F_ROC_10", "Hint",
     ]
     render_table(df, cols, height=300)
@@ -721,9 +729,32 @@ def render_conservative_table(df):
     cols = [
         "Conservative_Rank", "ID", "Name", "Industry", "Close", "Conservative_Score",
         "Integrated_Score", "Institution_Score", "Conservative_Tier",
-        "Stop_Loss_Price", "Sell_Zone", "Volume_Ratio", "ROC_3", "ROC_5", "Hint",
+        "Best_Buy_Zone", "Buy_Zone_Status", "Stop_Loss_Price", "Sell_Zone", "Volume_Ratio", "ROC_3", "ROC_5", "Hint",
     ]
     render_table(df, cols, height=300)
+
+
+def merge_stock_rows(*dfs):
+    frames = []
+    for df in dfs:
+        if df is not None and not df.empty:
+            frames.append(df.copy())
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = pd.concat(frames, ignore_index=True, sort=False)
+    key_series = merged.get("Ticker")
+    if key_series is None:
+        key_series = merged.get("ID", pd.Series(index=merged.index, dtype="object"))
+    else:
+        key_series = key_series.fillna(
+            merged.get("ID", pd.Series(index=merged.index, dtype="object"))
+        )
+
+    merged["_merge_key"] = key_series.astype(str)
+    merged = merged.drop_duplicates(subset="_merge_key", keep="first")
+    return merged.drop(columns="_merge_key")
 
 
 def build_history_comparison(df_all, result_df, target_date):
@@ -924,6 +955,8 @@ def sidebar():
         st.session_state.conservative_result = pd.DataFrame()
         st.session_state.history_result = pd.DataFrame()
         st.session_state.history_comparison = pd.DataFrame()
+        st.session_state.history_conservative_result = pd.DataFrame()
+        st.session_state.history_conservative_comparison = pd.DataFrame()
         st.session_state.single_result = pd.DataFrame()
 
     st.sidebar.divider()
@@ -950,27 +983,37 @@ def latest_tab():
             f"{data_logs}\n{run_logs}\n{attack_logs}\n{conservative_logs}"
         ).strip()
 
-    if not st.session_state.attack_result.empty:
-        st.markdown(f"**強勢攻擊 Top{stock_1.AGGRESSIVE_TOP_N} / Top3**")
+    latest_fund_rows = merge_stock_rows(
+        st.session_state.scan_result,
+        st.session_state.attack_result,
+        st.session_state.conservative_result,
+    )
+    tab_standard, tab_attack, tab_conservative, tab_fund = st.tabs(
+        ["標準 Top20", "強勢攻擊", "保守策略", "基本面查詢"]
+    )
+
+    with tab_standard:
+        cols = [
+            "Rank", "ID", "Name", "Industry", "Close", "AI_Score", "Integrated_Score",
+            "Aggressive_Tier", "Conservative_Tier", "Best_Buy_Zone", "Buy_Zone_Status",
+            "Avg_Value_20", "Volume_Ratio", "ROC_3", "ROC_5", "F_ROC_10",
+            "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Hint",
+        ]
+        render_table(st.session_state.scan_result, cols, height=520)
+
+    with tab_attack:
         render_attack_table(st.session_state.attack_result)
 
-    if not st.session_state.conservative_result.empty:
-        st.markdown(f"**保守策略 Top{stock_1.CONSERVATIVE_TOP_N} / Top3**")
+    with tab_conservative:
         render_conservative_table(st.session_state.conservative_result)
 
-    st.markdown("**Top20 觀察名單**")
-    cols = [
-        "Rank", "ID", "Name", "Industry", "Close", "AI_Score", "Integrated_Score",
-        "Aggressive_Tier", "Conservative_Tier", "Avg_Value_20", "Volume_Ratio", "ROC_3",
-        "ROC_5", "F_ROC_10", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Hint",
-    ]
-    render_table(st.session_state.scan_result, cols, height=520)
-    render_fundamentals_panel(
-        st.session_state.scan_result,
-        st.session_state.market_data,
-        st.session_state.stock_dict,
-        key_prefix="latest",
-    )
+    with tab_fund:
+        render_fundamentals_panel(
+            latest_fund_rows,
+            st.session_state.market_data,
+            st.session_state.stock_dict,
+            key_prefix="latest",
+        )
 
 
 def history_tab():
@@ -1002,43 +1045,105 @@ def history_tab():
             forward_days_list=FORWARD_DAYS,
             capital_per_stock=stock_1.CAPITAL_PER_STOCK,
             stop_loss_pct=stop_loss_pct,
+            strategy_mode="standard",
+        )
+        conservative_result_df, conservative_logs = capture_output(
+            stock_1.run_historical_signal_test,
+            df_all,
+            target_date_str=target_date,
+            top_n=stock_1.CONSERVATIVE_TOP_N,
+            forward_days_list=FORWARD_DAYS,
+            capital_per_stock=stock_1.CAPITAL_PER_STOCK,
+            stop_loss_pct=stop_loss_pct,
+            strategy_mode="conservative",
         )
         comparison_df = build_history_comparison(df_all, result_df, target_date)
+        conservative_comparison_df = build_history_comparison(
+            df_all,
+            conservative_result_df,
+            target_date,
+        )
 
         st.session_state.history_result = result_df
         st.session_state.history_comparison = comparison_df
-        st.session_state.last_logs = f"{data_logs}\n{run_logs}".strip()
+        st.session_state.history_conservative_result = conservative_result_df
+        st.session_state.history_conservative_comparison = conservative_comparison_df
+        st.session_state.last_logs = (
+            f"{data_logs}\n{run_logs}\n{conservative_logs}"
+        ).strip()
 
-    if not st.session_state.history_comparison.empty:
-        st.markdown("**績效比較**")
-        bench_value_col = f"{stock_1.BENCHMARK_NAME} 淨值"
-        if (
-            bench_value_col in st.session_state.history_comparison.columns
-            and st.session_state.history_comparison[bench_value_col].isna().all()
-        ):
-            st.warning(
-                f"目前快取沒有 {stock_1.BENCHMARK_NAME} ({stock_1.BENCHMARK_TICKER}) "
-                "資料。請按左側「強制重新下載」更新快取後再驗證。"
-            )
-        render_table(st.session_state.history_comparison, height=320)
-
-    st.markdown("**推薦名單**")
-    cols = [
+    history_fund_rows = merge_stock_rows(
+        st.session_state.history_result,
+        st.session_state.history_conservative_result,
+    )
+    standard_cols = [
         "Rank", "ID", "Name", "Industry", "AI_Score", "Integrated_Score",
-        "Aggressive_Tier", "Conservative_Tier", "Entry_Date", "Entry_Open", "Entry_Gap_%",
+        "Aggressive_Tier", "Conservative_Tier", "Best_Buy_Zone", "Buy_Zone_Status",
+        "Entry_Date", "Entry_Open", "Entry_Gap_%",
         "Entry_Filter", "Backtest_Stop_Price", "Stop_Loss_Pct", "Sell_Zone",
         "Stop_Exit_Date", "Stop_Exit_Price", "Stop_Exit_Reason", "Stop_Net_Return_%",
         "Hold_Today_Date", "Hold_Today_Close", "Hold_Today_Net_Return_%",
         "Day1_Net_Return_%", "Day7_Net_Return_%", "Day30_Net_Return_%",
         "Avg_Value_20", "Volume_Ratio", "Hint",
     ]
-    render_table(st.session_state.history_result, cols, height=430)
-    render_fundamentals_panel(
-        st.session_state.history_result,
-        st.session_state.market_data,
-        st.session_state.stock_dict,
-        key_prefix="history",
+    conservative_cols = [
+        "Rank", "ID", "Name", "Industry", "Conservative_Score", "Integrated_Score",
+        "Conservative_Tier", "Best_Buy_Zone", "Buy_Zone_Status",
+        "Entry_Date", "Entry_Open", "Entry_Gap_%",
+        "Entry_Filter", "Backtest_Stop_Price", "Stop_Loss_Pct", "Sell_Zone",
+        "Stop_Exit_Date", "Stop_Exit_Price", "Stop_Exit_Reason", "Stop_Net_Return_%",
+        "Hold_Today_Date", "Hold_Today_Close", "Hold_Today_Net_Return_%",
+        "Day1_Net_Return_%", "Day7_Net_Return_%", "Day30_Net_Return_%",
+        "Avg_Value_20", "Volume_Ratio", "Hint",
+    ]
+    tab_compare, tab_standard, tab_conservative, tab_fund = st.tabs(
+        ["績效比較", "標準策略", "保守策略", "基本面查詢"]
     )
+
+    with tab_compare:
+        if not st.session_state.history_comparison.empty:
+            st.markdown("**標準策略績效比較**")
+            bench_value_col = f"{stock_1.BENCHMARK_NAME} 淨值"
+            if (
+                bench_value_col in st.session_state.history_comparison.columns
+                and st.session_state.history_comparison[bench_value_col].isna().all()
+            ):
+                st.warning(
+                    f"目前快取沒有 {stock_1.BENCHMARK_NAME} ({stock_1.BENCHMARK_TICKER}) "
+                    "資料。請按左側「強制重新下載」更新快取後再驗證。"
+                )
+            render_table(st.session_state.history_comparison, height=260)
+
+        if not st.session_state.history_conservative_comparison.empty:
+            st.markdown("**保守策略績效比較**")
+            bench_value_col = f"{stock_1.BENCHMARK_NAME} 淨值"
+            if (
+                bench_value_col in st.session_state.history_conservative_comparison.columns
+                and st.session_state.history_conservative_comparison[bench_value_col].isna().all()
+            ):
+                st.warning(
+                    f"目前快取沒有 {stock_1.BENCHMARK_NAME} ({stock_1.BENCHMARK_TICKER}) "
+                    "資料。請按左側「強制重新下載」更新快取後再驗證。"
+                )
+            render_table(st.session_state.history_conservative_comparison, height=260)
+
+    with tab_standard:
+        render_table(st.session_state.history_result, standard_cols, height=430)
+
+    with tab_conservative:
+        render_table(
+            st.session_state.history_conservative_result,
+            conservative_cols,
+            height=430,
+        )
+
+    with tab_fund:
+        render_fundamentals_panel(
+            history_fund_rows,
+            st.session_state.market_data,
+            st.session_state.stock_dict,
+            key_prefix="history_all",
+        )
 
 
 def single_tab():
@@ -1103,13 +1208,17 @@ def single_tab():
         )
 
     plan_cols = st.columns(4)
-    plan_cols[0].metric("停損價", fmt_number(row.get("Stop_Loss_Price")))
-    plan_cols[1].metric("最高追價", fmt_number(row.get("Max_Buy_Price")))
+    plan_cols[0].metric("最佳買入區間", row.get("Best_Buy_Zone", "-"))
+    plan_cols[1].metric("買點狀態", row.get("Buy_Zone_Status", "-"))
+    plan_cols[2].metric("停損價", fmt_number(row.get("Stop_Loss_Price")))
+    plan_cols[3].metric("停利觀察區", row.get("Sell_Zone", "-"))
+
+    exec_cols = st.columns(3)
+    exec_cols[0].metric("最高追價", fmt_number(row.get("Max_Buy_Price")))
     capital = row.get("Suggested_Capital")
-    plan_cols[2].metric("建議金額", "-" if capital is None or pd.isna(capital) else f"{float(capital):,.0f}")
+    exec_cols[1].metric("建議金額", "-" if capital is None or pd.isna(capital) else f"{float(capital):,.0f}")
     shares = row.get("Suggested_Shares")
-    plan_cols[3].metric("建議股數", "-" if shares is None or pd.isna(shares) else f"{float(shares):,.0f}")
-    st.metric("停利觀察區", row.get("Sell_Zone", "-"))
+    exec_cols[2].metric("建議股數", "-" if shares is None or pd.isna(shares) else f"{float(shares):,.0f}")
     if isinstance(row.get("Exit_Rule", ""), str) and row.get("Exit_Rule", "").strip():
         st.caption(row.get("Exit_Rule"))
 
@@ -1119,8 +1228,9 @@ def single_tab():
         "AI_Score", "Integrated_Score", "Institution_Score", "Conservative_Score",
         "Aggressive_Rank", "Aggressive_Tier", "Conservative_Rank", "Conservative_Tier", "Market_PR_%",
         "ROC_1", "ROC_3", "ROC_5", "ROC_10", "ROC_20", "ROC_30",
-        "Volume_Ratio", "Avg_Value_20", "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price",
-        "Suggested_Capital", "Recent_20_High", "Recent_20_Low", "Reasons",
+        "Volume_Ratio", "Avg_Value_20", "Best_Buy_Zone", "Buy_Zone_Status",
+        "Stop_Loss_Price", "Sell_Zone", "Max_Buy_Price", "Suggested_Capital",
+        "Recent_20_High", "Recent_20_Low", "Reasons",
     ]
     render_table(result_df, cols, height=260)
     render_fundamentals_panel(

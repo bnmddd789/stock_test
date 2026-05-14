@@ -868,6 +868,20 @@ def add_trade_plan_columns(df):
     risk_per_share = (close - stop_loss).clip(lower=0.01)
     take_profit_low = close + risk_per_share * 2
     take_profit_high = close + risk_per_share * 3
+    best_buy_low = pd.concat([ma20 * 1.01, stop_loss * 1.03], axis=1).max(axis=1)
+    best_buy_high = pd.concat(
+        [ma5 * 1.02, close * 1.01, close * (1 + MAX_ENTRY_GAP_PCT / 100)],
+        axis=1,
+    ).min(axis=1)
+    fallback_buy_low = pd.concat([ma5 * 0.99, stop_loss * 1.03], axis=1).max(axis=1)
+    best_buy_low = best_buy_low.fillna(fallback_buy_low)
+    best_buy_high = best_buy_high.fillna(close)
+    invalid_zone = best_buy_high < best_buy_low
+    best_buy_low = best_buy_low.where(~invalid_zone, fallback_buy_low)
+    best_buy_high = best_buy_high.where(
+        ~invalid_zone,
+        pd.concat([close, fallback_buy_low * 1.03], axis=1).max(axis=1),
+    )
     risk_budget = PORTFOLIO_CAPITAL * RISK_PER_TRADE_PCT
     raw_shares = np.floor(risk_budget / risk_per_share)
     round_lot_shares = np.floor(raw_shares / 1000) * 1000
@@ -878,6 +892,8 @@ def add_trade_plan_columns(df):
     df["Risk_Per_Share"] = risk_per_share
     df["Take_Profit_Low"] = take_profit_low
     df["Take_Profit_High"] = take_profit_high
+    df["Best_Buy_Low"] = best_buy_low
+    df["Best_Buy_High"] = best_buy_high
     df["Suggested_Shares"] = suggested_shares
     df["Suggested_Capital"] = suggested_capital
     df["Max_Buy_Price"] = close * (1 + MAX_ENTRY_GAP_PCT / 100)
@@ -887,6 +903,21 @@ def add_trade_plan_columns(df):
         else ""
         for low, high in zip(take_profit_low, take_profit_high)
     ]
+    df["Best_Buy_Zone"] = [
+        f"{low:.2f} ~ {high:.2f}"
+        if not pd.isna(low) and not pd.isna(high)
+        else ""
+        for low, high in zip(best_buy_low, best_buy_high)
+    ]
+    df["Buy_Zone_Status"] = np.where(
+        close > best_buy_high,
+        "高於買點區，等回檔",
+        np.where(
+            close < best_buy_low,
+            "低於買點區，等轉強",
+            "位於買點區，可分批布局",
+        ),
+    )
     df["Exit_Rule"] = "跌破MA5減碼；跌破MA20或停損價出場；漲到停利區間可分批賣出；開高超過上限不追"
     return df
 
@@ -1399,6 +1430,10 @@ def analyze_single_stock(df_all, code):
         'Market_Status': market_risk.get('Market_Status'),
         'Market_Message': market_risk.get('Market_Message'),
         'Stop_Loss_Price': latest_plan.get('Stop_Loss_Price'),
+        'Best_Buy_Low': latest_plan.get('Best_Buy_Low'),
+        'Best_Buy_High': latest_plan.get('Best_Buy_High'),
+        'Best_Buy_Zone': latest_plan.get('Best_Buy_Zone'),
+        'Buy_Zone_Status': latest_plan.get('Buy_Zone_Status'),
         'Take_Profit_Low': latest_plan.get('Take_Profit_Low'),
         'Take_Profit_High': latest_plan.get('Take_Profit_High'),
         'Sell_Zone': latest_plan.get('Sell_Zone'),
@@ -1689,7 +1724,8 @@ def run_historical_signal_test(
     top_n=20,
     forward_days_list=[1, 3, 5, 7, 10, 14, 21, 30],
     capital_per_stock=100_000,
-    stop_loss_pct=DEFAULT_STOP_LOSS_PCT
+    stop_loss_pct=DEFAULT_STOP_LOSS_PCT,
+    strategy_mode="standard",
 ):
     try:
         target_date = normalize_input_date(target_date_str)
@@ -1728,7 +1764,22 @@ def run_historical_signal_test(
         print(f"❌ {signal_date.date()} 沒有符合條件的股票。")
         return pd.DataFrame()
 
-    selected = scored.sort_values(by='AI_Score', ascending=False).head(top_n).copy()
+    strategy_mode = str(strategy_mode or "standard").lower()
+    strategy_label = "標準 Top20"
+
+    if strategy_mode == "conservative":
+        strategy_label = "保守策略"
+        selected = scored[scored["Conservative_Eligible"]].copy()
+        selected = selected.sort_values(
+            by=["Conservative_Score", "Integrated_Score", "AI_Score"],
+            ascending=False,
+        ).head(top_n).copy()
+    else:
+        selected = scored.sort_values(by='AI_Score', ascending=False).head(top_n).copy()
+
+    if selected.empty:
+        print(f"ℹ️ {signal_date.date()} 沒有股票通過 {strategy_label} 的歷史篩選。")
+        return pd.DataFrame()
 
     result_rows = []
 
@@ -1767,6 +1818,8 @@ def run_historical_signal_test(
         max_available_days = len(stock_hist) - entry_idx - 1
 
         result = {
+            'Strategy_Mode': strategy_mode,
+            'Strategy_Label': strategy_label,
             'Signal_Date': signal_date.date(),
             'Entry_Date': entry_date.date(),
             'ID': row['ID'],
@@ -1796,6 +1849,10 @@ def run_historical_signal_test(
             'Conservative_Score': row.get('Conservative_Score', np.nan),
             'Stage2_Trend_OK': row.get('Stage2_Trend_OK', False),
             'Stop_Loss_Price': row.get('Stop_Loss_Price', np.nan),
+            'Best_Buy_Low': row.get('Best_Buy_Low', np.nan),
+            'Best_Buy_High': row.get('Best_Buy_High', np.nan),
+            'Best_Buy_Zone': row.get('Best_Buy_Zone', ''),
+            'Buy_Zone_Status': row.get('Buy_Zone_Status', ''),
             'Max_Buy_Price': row.get('Max_Buy_Price', np.nan),
             'Suggested_Capital': row.get('Suggested_Capital', np.nan),
             'Exit_Rule': row.get('Exit_Rule', ''),
@@ -1889,7 +1946,13 @@ def run_historical_signal_test(
         print("❌ 指定日期後續資料不足，無法驗證。")
         return result_df
 
-    result_df = result_df.sort_values('AI_Score', ascending=False).reset_index(drop=True)
+    if strategy_mode == "conservative":
+        result_df = result_df.sort_values(
+            ['Conservative_Score', 'Integrated_Score', 'AI_Score'],
+            ascending=False,
+        ).reset_index(drop=True)
+    else:
+        result_df = result_df.sort_values('AI_Score', ascending=False).reset_index(drop=True)
     result_df['Rank'] = result_df.index + 1
 
     # 找出目前至少有一檔可驗證的天數
@@ -1900,7 +1963,7 @@ def run_historical_signal_test(
             available_forward_days.append(n)
 
     print("\n" + "=" * 120)
-    print(f" 🎯 歷史指定日期推薦名單：{signal_date.date()}")
+    print(f" 🎯 {strategy_label} 歷史推薦名單：{signal_date.date()}")
     print(f" 📌 進場假設：下一交易日 {result_df['Entry_Date'].iloc[0]} 開盤買進")
     print(" 🛡️ 防偷看：AI_Score 只使用推薦日收盤以前資料，未來價格只用於驗證")
     print(f" 💰 投入假設：每檔投入 {capital_per_stock:,.0f} 元")
